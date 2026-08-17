@@ -15,12 +15,13 @@ synthesis, and the SpeexDSP canceller run end to end on the baseline scenario:
 python src/run_experiment.py --scenario baseline --seed 0
 ```
 
-This generates the room impulse responses, synthesises the microphone signal,
-runs each system, persists every intermediate signal under `data/generated/`,
-and prints sanity diagnostics (achieved RT60, direct-path delay, scaling
-constant, echo reduction). The NLMS implementation, metrics, and the full
-experiment matrix are being added incrementally; results will live in
-`results/`.
+This generates the room impulse responses (wall absorption calibrated per
+RT60 level against Schroeder-measured RT60, with `inverse_sabine` as the
+initialisation), synthesises the microphone signal, runs each system
+(`none`, `nlms_f64`, `speex`), persists every intermediate signal under
+`data/generated/`, and prints sanity diagnostics (achieved RT60, direct-path
+delay, scaling constant, echo reduction). Metrics and the full experiment
+matrix are being added incrementally; results will live in `results/`.
 
 ## Setup
 

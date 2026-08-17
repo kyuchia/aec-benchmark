@@ -21,6 +21,14 @@ room:
     distance_m: 1.0
     height_m: 1.2
   min_wall_clearance_m: 0.5
+  # Absorption is calibrated per RT60 level by bisection until the RT60
+  # measured on h_echo (Schroeder backward integration) at the reference
+  # distance is within tolerance of the target; inverse_sabine provides the
+  # initial value only. The same calibrated absorption is then used across
+  # all distance levels of that RT60 row.
+  rt60_calibration:
+    reference_distance_m: 1.0
+    tolerance_pct: 3.0
 
 speech:
   dataset_dir: data/speech/LibriSpeech/test-clean
@@ -70,6 +78,7 @@ systems:
     filter_length_ms: 200.0
     mu: 0.5
     delta: 1.0e-6
+    record_every: 160    # coefficient-trajectory snapshot interval (samples)
 
 scenario_defaults: &defaults
   rt60_s: 0.4

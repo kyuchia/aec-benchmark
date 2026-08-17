@@ -19,6 +19,7 @@ import numpy as np
 import soundfile as sf
 import yaml
 
+from aec_nlms import nlms
 from aec_speex import run_speex_aec
 from room import build_rirs
 from signals import (
@@ -44,11 +45,11 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 
 # ---------------------------------------------------------------------------
 # Systems under test (T0). Each takes float x, d and the run's shared int16
-# scale, and returns float e plus a dict of system-specific metadata.
+# scale, and returns (float e, system metadata, extra arrays to persist).
 # ---------------------------------------------------------------------------
 
 def run_none(x: np.ndarray, d: np.ndarray, scale: float, cfg: dict,
-             sample_rate: int) -> tuple[np.ndarray, dict]:
+             sample_rate: int) -> tuple[np.ndarray, dict, dict]:
     """0 dB ERLE reference.
 
     Not a pure passthrough: d goes through the identical int16 round-trip
@@ -56,11 +57,35 @@ def run_none(x: np.ndarray, d: np.ndarray, scale: float, cfg: dict,
     measured on the same signal path (same quantisation floor).
     """
     d16 = float_to_int16(d, scale, name="d (none)")
-    return int16_to_float(d16, scale), {}
+    return int16_to_float(d16, scale), {}, {}
+
+
+def run_nlms_f64(x: np.ndarray, d: np.ndarray, scale: float, cfg: dict,
+                 sample_rate: int) -> tuple[np.ndarray, dict, dict]:
+    """Float64 NLMS. Stays in float throughout — no int16 round-trip.
+
+    That asymmetry against the fixed-point systems is deliberate and is
+    noted in the report as a caveat of comparing float and fixed point.
+    """
+    sys_cfg = cfg["systems"]["nlms_f64"]
+    L = int(round(sys_cfg["filter_length_ms"] * 1e-3 * sample_rate))
+    record_every = sys_cfg.get("record_every")
+    out = nlms(x, d, L=L, mu=float(sys_cfg["mu"]),
+               delta=float(sys_cfg["delta"]),
+               record_every=int(record_every) if record_every else None)
+    extras = {"w_final": out["w_final"]}
+    if out["w_traj"] is not None:
+        extras["w_traj"] = out["w_traj"]
+    return out["e"], {
+        "filter_length_samples": L,
+        "mu": sys_cfg["mu"],
+        "delta": sys_cfg["delta"],
+        "record_every": record_every,
+    }, extras
 
 
 def run_speex(x: np.ndarray, d: np.ndarray, scale: float, cfg: dict,
-              sample_rate: int) -> tuple[np.ndarray, dict]:
+              sample_rate: int) -> tuple[np.ndarray, dict, dict]:
     sys_cfg = cfg["systems"]["speex"]
     frame_size = int(sys_cfg["frame_size"])
     filter_length = int(round(
@@ -80,11 +105,12 @@ def run_speex(x: np.ndarray, d: np.ndarray, scale: float, cfg: dict,
         "frame_size": frame_size,
         "filter_length_samples": filter_length,
         "output_saturated_samples": n_saturated,
-    }
+    }, {}
 
 
 SYSTEM_RUNNERS = {
     "none": run_none,
+    "nlms_f64": run_nlms_f64,
     "speex": run_speex,
 }
 
@@ -126,9 +152,9 @@ def run_single(cfg: dict, scenario_id: str, seed_index: int,
 
     results: dict = {}
     for system in systems:
-        e, sys_meta = SYSTEM_RUNNERS[system](sigs.x, sigs.d, scale, cfg,
-                                             sample_rate)
-        np.savez_compressed(run_dir / f"e_{system}.npz", e=e)
+        e, sys_meta, extras = SYSTEM_RUNNERS[system](sigs.x, sigs.d, scale,
+                                                     cfg, sample_rate)
+        np.savez_compressed(run_dir / f"e_{system}.npz", e=e, **extras)
         save_wav(f"e_{system}.wav", e)
 
         # Rough echo-reduction diagnostic (NOT the ERLE metric): energy in
@@ -150,6 +176,7 @@ def run_single(cfg: dict, scenario_id: str, seed_index: int,
         "rt60_target_s": rirs.rt60_target_s,
         "rt60_achieved_echo_s": rirs.rt60_achieved_echo_s,
         "rt60_achieved_near_s": rirs.rt60_achieved_near_s,
+        "rt60_calibration": rirs.calibration,
         "geometry": rirs.geometry,
         "int16_scale": scale,
         "int16_headroom_db": headroom_db,
@@ -183,7 +210,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenario", required=True)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--systems", nargs="+", default=["none", "speex"],
+    parser.add_argument("--systems", nargs="+",
+                        default=["none", "nlms_f64", "speex"],
                         choices=sorted(SYSTEM_RUNNERS))
     args = parser.parse_args()
 
