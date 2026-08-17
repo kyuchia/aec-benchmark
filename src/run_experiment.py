@@ -19,9 +19,11 @@ import numpy as np
 import soundfile as sf
 import yaml
 
+import metrics
 from aec_nlms import nlms
 from aec_speex import run_speex_aec
 from room import build_rirs
+from segment import segment
 from signals import (
     SignalSet,
     compute_int16_scale,
@@ -150,23 +152,85 @@ def run_single(cfg: dict, scenario_id: str, seed_index: int,
     save_wav("x.wav", sigs.x)
     save_wav("d.wav", sigs.d)
 
+    seg = segment(sigs.d_echo, sigs.s, sample_rate, cfg["segmentation"])
+    np.savez_compressed(
+        run_dir / "segmentation.npz",
+        frame_len=seg.frame_len,
+        far_active=seg.far_active,
+        near_active=seg.near_active,
+    )
+    met_cfg = cfg["metrics"]
+    frame_times = seg.frame_times_s()
+    has_double_talk = bool(np.any(seg.double_talk))
+
     results: dict = {}
+    metrics_out: dict = {}
     for system in systems:
         e, sys_meta, extras = SYSTEM_RUNNERS[system](sigs.x, sigs.d, scale,
                                                      cfg, sample_rate)
         np.savez_compressed(run_dir / f"e_{system}.npz", e=e, **extras)
         save_wav(f"e_{system}.wav", e)
+        results[system] = sys_meta
 
-        # Rough echo-reduction diagnostic (NOT the ERLE metric): energy in
-        # the final third, where adaptation has had time to settle. Only
-        # indicative for far-single-talk runs.
-        tail = slice(int(len(sigs.d) * 2 / 3), None)
-        p_d = float(np.mean(sigs.d[tail] ** 2))
-        p_e = float(np.mean(e[tail] ** 2))
-        results[system] = {
-            "tail_echo_reduction_db": 10.0 * np.log10(p_d / p_e),
-            **sys_meta,
+        erle = metrics.erle_curve(
+            sigs.d, e, seg.erle_valid, seg.frame_len,
+            ema_alpha=float(met_cfg["erle_ema_alpha"]),
+            steady_state_last_fraction=float(
+                met_cfg["steady_state_last_fraction"]),
+            sanity_max_db=float(met_cfg["erle_sanity_max_db"]),
+        )
+        conv_t = metrics.convergence_time_s(
+            erle["erle_smoothed_db"], seg.erle_valid,
+            erle["steady_state_db"], frame_times,
+            float(met_cfg["convergence_fraction"]),
+        )
+        entry: dict = {
+            "erle_steady_state_db": erle["steady_state_db"],
+            "erle_n_valid_frames": erle["n_valid_frames"],
+            "convergence_time_s": None if np.isnan(conv_t) else conv_t,
+            "converged": bool(np.isfinite(conv_t)),
         }
+
+        metric_arrays: dict = {
+            "frame_times_s": frame_times,
+            "erle_db": erle["erle_db"],
+            "erle_smoothed_db": erle["erle_smoothed_db"],
+        }
+
+        if has_double_talk:
+            segsnr = metrics.segmental_snr_db(sigs.s, e, seg.double_talk,
+                                              seg.frame_len)
+            lsd = metrics.log_spectral_distance_db(
+                sigs.s, e, seg.double_talk, seg.frame_len,
+                floor_db=float(met_cfg["lsd_floor_db"]))
+            near_idx = np.flatnonzero(seg.near_active)
+            span = slice(near_idx[0] * seg.frame_len,
+                         (near_idx[-1] + 1) * seg.frame_len)
+            quality = metrics.speech_quality_scores(sigs.s[span], e[span],
+                                                    sample_rate)
+            entry.update({
+                "double_talk_segsnr_db": segsnr["segsnr_db"],
+                "double_talk_segsnr_n_frames": segsnr["n_frames"],
+                "double_talk_lsd_db": lsd["lsd_db"],
+                **quality,
+            })
+
+        if "w_final" in extras:
+            entry["misalignment_final_db"] = metrics.misalignment_db(
+                extras["w_final"], rirs.h_echo)
+            if "w_traj" in extras:
+                record_every = int(
+                    cfg["systems"][system]["record_every"])
+                metric_arrays["misalignment_curve_db"] = (
+                    metrics.misalignment_curve_db(extras["w_traj"],
+                                                  rirs.h_echo))
+                metric_arrays["misalignment_times_s"] = (
+                    (np.arange(len(extras["w_traj"])) + 1)
+                    * record_every / sample_rate)
+
+        np.savez_compressed(run_dir / f"metrics_{system}.npz",
+                            **metric_arrays)
+        metrics_out[system] = entry
 
     meta = {
         "scenario_id": scenario_id,
@@ -185,6 +249,16 @@ def run_single(cfg: dict, scenario_id: str, seed_index: int,
     }
     with open(run_dir / "run_meta.json", "w") as f:
         json.dump(meta, f, indent=2)
+
+    metrics_json = {
+        "scenario_id": scenario_id,
+        "seed_index": seed_index,
+        "has_double_talk": has_double_talk,
+        "systems": metrics_out,
+    }
+    with open(run_dir / "metrics.json", "w") as f:
+        json.dump(metrics_json, f, indent=2)
+    meta["metrics"] = metrics_json
     return meta
 
 
@@ -201,9 +275,17 @@ def _print_diagnostics(meta: dict) -> None:
           f"{geo['h_echo_peak_sample']}")
     print(f"int16 scale: {meta['int16_scale']:.1f} "
           f"(headroom {meta['int16_headroom_db']} dB)")
-    for system, res in meta["systems"].items():
-        print(f"{system:>8}: tail echo reduction "
-              f"{res['tail_echo_reduction_db']:+.1f} dB")
+    for system, entry in meta["metrics"]["systems"].items():
+        conv = entry["convergence_time_s"]
+        conv_str = f"{conv:.2f} s" if conv is not None else "not converged"
+        line = (f"{system:>8}: steady-state ERLE "
+                f"{entry['erle_steady_state_db']:5.1f} dB | "
+                f"convergence {conv_str}")
+        if "double_talk_segsnr_db" in entry:
+            line += f" | DT segSNR {entry['double_talk_segsnr_db']:.1f} dB"
+        if "misalignment_final_db" in entry:
+            line += f" | misalign {entry['misalignment_final_db']:.1f} dB"
+        print(line)
 
 
 def main() -> None:

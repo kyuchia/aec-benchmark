@@ -9,13 +9,20 @@ makes SpeexDSP's built-in protection visible in the double-talk results),
 no step-size scheduling, float64 throughout.
 
 The sliding-window input power ||x(n)||^2 is evaluated in O(1) per sample
-from a precomputed cumulative sum of x^2 — mathematically identical to
-the recursive add/subtract update, without its accumulated drift.
+from a precomputed cumulative sum of x^2. Differencing two large running
+sums is subject to cancellation error as the sums grow, so the estimate
+is checked against an exact recomputation on a fixed period and the run
+fails loudly if the two ever disagree beyond a small tolerance.
 """
 
 from __future__ import annotations
 
 import numpy as np
+
+# Period (in samples) of the exact ||x||^2 recomputation that guards the
+# O(1) cumulative-sum estimate, and the tolerance the two must agree to.
+POWER_CHECK_PERIOD = 4096
+POWER_CHECK_REL_TOL = 1e-9
 
 
 def nlms(x: np.ndarray, d: np.ndarray, L: int, mu: float,
@@ -52,6 +59,13 @@ def nlms(x: np.ndarray, d: np.ndarray, L: int, mu: float,
         err = d[i] - w @ seg
         e[i] = err
         norm = css[i + 1] - css[max(0, i + 1 - L)]
+        if (i + 1) % POWER_CHECK_PERIOD == 0:
+            exact = float(seg @ seg)
+            if abs(norm - exact) > POWER_CHECK_REL_TOL * (exact + 1.0):
+                raise AssertionError(
+                    f"sliding-window power drifted at sample {i}: "
+                    f"fast {norm!r} vs exact {exact!r}"
+                )
         w += (mu * err / (norm + delta)) * seg
         if record_every is not None and (i + 1) % record_every == 0:
             snapshots.append(w[::-1].copy())

@@ -58,6 +58,52 @@ def test_silence_leaves_filter_untouched():
     assert np.allclose(out["w_final"], 0.0)  # no update without input power
 
 
+def _nlms_naive_pure_python(x, d, L, mu, delta):
+    """Per-sample reference implementation: pure Python scalars, explicit
+    tap buffer, no numpy in the loop. The ground truth for exactness."""
+    n = len(x)
+    w = [0.0] * L        # w[0] pairs with the newest sample
+    buf = [0.0] * L      # buf[0] = x(i), buf[1] = x(i-1), ...
+    e = [0.0] * n
+    for i in range(n):
+        buf = [float(x[i])] + buf[:-1]
+        y = sum(wk * bk for wk, bk in zip(w, buf))
+        err = float(d[i]) - y
+        e[i] = err
+        norm = sum(b * b for b in buf)
+        g = mu * err / (norm + delta)
+        w = [wk + g * bk for wk, bk in zip(w, buf)]
+    return np.array(e)
+
+
+def test_fast_implementation_is_samplewise_exact():
+    # The fast implementation must be the same sample-wise algorithm as a
+    # naive per-sample loop — speed does not license changing the system
+    # under test. Serial dependency: w(n+1) depends on e(n).
+    rng = np.random.default_rng(6)
+    n = 2000
+    x = rng.standard_normal(n)
+    h = rng.standard_normal(16) * np.exp(-0.2 * np.arange(16))
+    d = np.convolve(x, h)[:n] + 0.01 * rng.standard_normal(n)
+
+    fast = nlms(x, d, L=32, mu=0.5, delta=1e-6)
+    ref = _nlms_naive_pure_python(x, d, L=32, mu=0.5, delta=1e-6)
+
+    max_diff = np.max(np.abs(fast["e"] - ref))
+    assert max_diff < 1e-12, f"per-sample deviation {max_diff:.2e}"
+
+
+def test_sliding_power_survives_full_length_run():
+    # 15 s at 16 kHz with the baseline 3200-tap filter: the in-loop periodic
+    # exact recomputation (POWER_CHECK_PERIOD) raises if the O(1) power
+    # estimate ever drifts beyond POWER_CHECK_REL_TOL.
+    rng = np.random.default_rng(7)
+    n = 240000
+    x = 0.05 * rng.standard_normal(n)
+    d = 0.5 * np.roll(x, 87)
+    nlms(x, d, L=3200, mu=0.5)  # must not raise
+
+
 def test_trajectory_shape_and_consistency():
     rng = np.random.default_rng(5)
     n = 1000

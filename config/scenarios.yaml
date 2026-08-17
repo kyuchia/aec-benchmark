@@ -69,6 +69,23 @@ noise:
   spectrum_nperseg: 1024
   filter_taps: 513
 
+# Three-state segmentation (far-active / near-active / neither), computed on
+# the ground-truth component signals (d_echo and s) independently, never on
+# the mixture. A frame is active when its mean power exceeds the absolute
+# threshold; activity is held for the hangover duration after the last
+# active frame to bridge inter-word pauses.
+segmentation:
+  frame_ms: 20.0
+  energy_threshold_dbov: -45.0
+  hangover_ms: 200.0
+
+metrics:
+  erle_ema_alpha: 0.9              # smoothed = a*prev + (1-a)*new, valid frames only
+  steady_state_last_fraction: 0.3  # steady state = median of final 30% of valid frames
+  convergence_fraction: 0.9        # ERLE first reaching this fraction of steady state
+  erle_sanity_max_db: 60.0         # steady state above this => reference signal wrong
+  lsd_floor_db: -120.0             # spectral floor for log-spectral distance
+
 systems:
   none: {}                  # explicit int16 round-trip at the run's scale
   speex:
