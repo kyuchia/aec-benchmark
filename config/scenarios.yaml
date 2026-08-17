@@ -108,3 +108,43 @@ scenario_defaults: &defaults
 scenarios:
   baseline:
     <<: *defaults
+
+# ---------------------------------------------------------------------------
+# Batch experiment matrix. Two-stage design, deliberately not a full
+# factorial. Every (scenario, seed, system) triple becomes one row in
+# results/raw/runs.csv.
+# ---------------------------------------------------------------------------
+batch:
+  stage_a:
+    # Main effects: 2-factor full cross, far single-talk, no noise.
+    systems: [none, nlms_f64, speex]
+    rt60_levels_s: [0.2, 0.4, 0.6, 0.8]
+    distance_levels_m: [0.3, 1.0, 2.5]
+    scenario:
+      talk: far_single
+      noise_type: none
+      snr_db: null
+      ser_db: 0.0
+
+  stage_b:
+    # One factor at a time around the baseline (scenario_defaults above).
+    talk:
+      systems: [none, nlms_f64, speex]
+      levels: [far_single, double, near_single]
+    noise:
+      systems: [none, nlms_f64, speex]
+      levels:
+        - {noise_type: none, snr_db: null}
+        - {noise_type: speech_shaped, snr_db: 20.0}
+        - {noise_type: speech_shaped, snr_db: 10.0}
+    tail_length:
+      # System parameter sweep (filter_length), both adaptive systems.
+      systems: [nlms_f64, speex]
+      levels_ms: [50.0, 100.0, 200.0, 400.0]
+    mu:
+      # nlms_f64 only — speex has no step size. Speex runs once at its
+      # baseline configuration as a clearly-labelled reference, not as a
+      # swept system.
+      systems: [nlms_f64]
+      reference_systems: [speex]
+      levels: [0.1, 0.3, 0.5, 0.9]

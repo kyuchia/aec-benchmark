@@ -99,6 +99,22 @@ def test_segmental_snr_excludes_zero_reference_frames():
     assert out["n_excluded_zero_ref"] == 5
 
 
+def test_segmental_snr_bit_exact_passthrough_is_inf():
+    rng = np.random.default_rng(5)
+    ref = rng.standard_normal(10 * FRAME)
+    out = metrics.segmental_snr_db(ref, ref.copy(), np.ones(10, dtype=bool),
+                                   FRAME)
+    assert out["segsnr_db"] == np.inf
+    assert out["n_excluded_zero_error"] == 10
+    # A mix: perfect frames excluded, imperfect frames measured.
+    est = ref.copy()
+    est[: 2 * FRAME] += 0.1 * rng.standard_normal(2 * FRAME)
+    out2 = metrics.segmental_snr_db(ref, est, np.ones(10, dtype=bool), FRAME)
+    assert out2["n_frames"] == 2
+    assert out2["n_excluded_zero_error"] == 8
+    assert np.isfinite(out2["segsnr_db"])
+
+
 def test_lsd_flat_gain_is_exact():
     # est = 0.5 * ref: power ratio 4 -> |10 log10 4| ~= 6.0206 dB in every
     # bin, so the rms over frequency equals it exactly.

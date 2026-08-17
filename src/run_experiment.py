@@ -1,18 +1,36 @@
-"""Run benchmark scenarios defined in config/scenarios.yaml.
+"""Batch entry point: run the experiment matrix from config/scenarios.yaml.
 
-Current stage: single-scenario end-to-end runs. For each (scenario, seed)
-this builds the room, synthesises the signals, runs the requested systems,
-persists every intermediate signal plus per-run metadata, and prints
-sanity diagnostics. Batch orchestration over the full matrix comes later.
+One row in results/raw/runs.csv = one (scenario, seed, system) triple,
+carrying every metric plus provenance (achieved RT60, scaling constant,
+calibrated absorption, git SHA, wall time). Figures and the report
+aggregate from that file only.
+
+Determinism: run IDs are pure functions of (stage, axis, level, seed,
+system). Utterance selection is keyed by the seed index (so speech
+material is paired across scenario levels — factor effects are not
+confounded with speaker changes), and the noise realisation is seeded
+from the (scenario, seed) cell identity — identical for every system on
+that cell, which is the fairness condition, and stable across re-runs.
+
+Failure policy: a failed or diverged run writes its row with status
+failed/diverged plus the reason, and the batch continues. After the
+batch, the row count is asserted against the expected count. Divergence
+(unprotected NLMS in double-talk is the expected case) is detected, not
+prevented, and its onset time is recorded as a data point.
 
 Usage:
-    python src/run_experiment.py --scenario baseline --seed 0
+    python src/run_experiment.py --batch            # full matrix
+    python src/run_experiment.py --scenario baseline --seed 0   # one cell
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import subprocess
+import time
+from hashlib import sha256
 from pathlib import Path
 
 import numpy as np
@@ -22,8 +40,8 @@ import yaml
 import metrics
 from aec_nlms import nlms
 from aec_speex import run_speex_aec
-from room import build_rirs
-from segment import segment
+from room import RoomRirs, build_rirs
+from segment import Segmentation, segment
 from signals import (
     SignalSet,
     compute_int16_scale,
@@ -35,22 +53,56 @@ from signals import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = REPO_ROOT / "config" / "scenarios.yaml"
 RUNS_DIR = REPO_ROOT / "data" / "generated" / "runs"
+RAW_DIR = REPO_ROOT / "results" / "raw"
+
+# |e| exceeding this factor times peak |d| (or any non-finite sample)
+# counts as divergence; the first offending sample sets the onset time.
+DIVERGENCE_FACTOR = 10.0
+
+CSV_FIELDS = [
+    "run_id", "stage", "axis", "level", "scenario_key", "seed", "system",
+    "status", "fail_reason", "divergence_time_s",
+    "talk", "noise_type", "snr_db", "ser_db",
+    "rt60_target_s", "rt60_achieved_echo_s", "rt60_achieved_near_s",
+    "speaker_mic_distance_m", "absorption_calibrated",
+    "absorption_sabine_init",
+    "filter_length_ms", "mu", "frame_size",
+    "int16_scale", "int16_headroom_db",
+    "erle_steady_state_db", "erle_n_valid_frames",
+    "convergence_time_s", "converged",
+    "segsnr_db", "stoi", "pesq_wb", "lsd_db",
+    "misalignment_final_db",
+    "far_speaker", "near_speaker",
+    "wall_time_s", "git_sha",
+]
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict:
     with open(path) as f:
         cfg = yaml.safe_load(f)
-    # dataset_dir is relative to the repo root
     cfg["speech"]["dataset_dir"] = str(REPO_ROOT / cfg["speech"]["dataset_dir"])
     return cfg
 
 
+def git_sha() -> str:
+    try:
+        sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, cwd=REPO_ROOT,
+                             check=True).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain"],
+                               capture_output=True, text=True, cwd=REPO_ROOT,
+                               check=True).stdout.strip()
+        return sha + ("-dirty" if dirty else "")
+    except Exception:
+        return "unknown"
+
+
 # ---------------------------------------------------------------------------
-# Systems under test (T0). Each takes float x, d and the run's shared int16
-# scale, and returns (float e, system metadata, extra arrays to persist).
+# Systems under test. Each takes float x, d, the run's shared int16 scale
+# and its merged parameter dict, and returns (float e, metadata, extras).
 # ---------------------------------------------------------------------------
 
-def run_none(x: np.ndarray, d: np.ndarray, scale: float, cfg: dict,
+def run_none(x: np.ndarray, d: np.ndarray, scale: float, sys_params: dict,
              sample_rate: int) -> tuple[np.ndarray, dict, dict]:
     """0 dB ERLE reference.
 
@@ -62,36 +114,33 @@ def run_none(x: np.ndarray, d: np.ndarray, scale: float, cfg: dict,
     return int16_to_float(d16, scale), {}, {}
 
 
-def run_nlms_f64(x: np.ndarray, d: np.ndarray, scale: float, cfg: dict,
+def run_nlms_f64(x: np.ndarray, d: np.ndarray, scale: float,
+                 sys_params: dict,
                  sample_rate: int) -> tuple[np.ndarray, dict, dict]:
     """Float64 NLMS. Stays in float throughout — no int16 round-trip.
 
     That asymmetry against the fixed-point systems is deliberate and is
     noted in the report as a caveat of comparing float and fixed point.
     """
-    sys_cfg = cfg["systems"]["nlms_f64"]
-    L = int(round(sys_cfg["filter_length_ms"] * 1e-3 * sample_rate))
-    record_every = sys_cfg.get("record_every")
-    out = nlms(x, d, L=L, mu=float(sys_cfg["mu"]),
-               delta=float(sys_cfg["delta"]),
+    L = int(round(sys_params["filter_length_ms"] * 1e-3 * sample_rate))
+    record_every = sys_params.get("record_every")
+    out = nlms(x, d, L=L, mu=float(sys_params["mu"]),
+               delta=float(sys_params["delta"]),
                record_every=int(record_every) if record_every else None)
     extras = {"w_final": out["w_final"]}
     if out["w_traj"] is not None:
         extras["w_traj"] = out["w_traj"]
     return out["e"], {
-        "filter_length_samples": L,
-        "mu": sys_cfg["mu"],
-        "delta": sys_cfg["delta"],
-        "record_every": record_every,
+        "filter_length_ms": sys_params["filter_length_ms"],
+        "mu": sys_params["mu"],
     }, extras
 
 
-def run_speex(x: np.ndarray, d: np.ndarray, scale: float, cfg: dict,
+def run_speex(x: np.ndarray, d: np.ndarray, scale: float, sys_params: dict,
               sample_rate: int) -> tuple[np.ndarray, dict, dict]:
-    sys_cfg = cfg["systems"]["speex"]
-    frame_size = int(sys_cfg["frame_size"])
+    frame_size = int(sys_params["frame_size"])
     filter_length = int(round(
-        sys_cfg["filter_length_ms"] * 1e-3 * sample_rate))
+        sys_params["filter_length_ms"] * 1e-3 * sample_rate))
     x16 = float_to_int16(x, scale, name="x (speex)")
     d16 = float_to_int16(d, scale, name="d (speex)")
     e16 = run_speex_aec(x16, d16, frame_size, filter_length, sample_rate)
@@ -104,9 +153,8 @@ def run_speex(x: np.ndarray, d: np.ndarray, scale: float, cfg: dict,
             "increase int16_headroom_db"
         )
     return int16_to_float(e16, scale), {
+        "filter_length_ms": sys_params["filter_length_ms"],
         "frame_size": frame_size,
-        "filter_length_samples": filter_length,
-        "output_saturated_samples": n_saturated,
     }, {}
 
 
@@ -117,180 +165,426 @@ SYSTEM_RUNNERS = {
 }
 
 
+def merged_sys_params(cfg: dict, system: str, overrides: dict) -> dict:
+    params = dict(cfg["systems"][system])
+    params.update(overrides)
+    return params
+
+
 # ---------------------------------------------------------------------------
-# Single run
+# Divergence detection
 # ---------------------------------------------------------------------------
 
-def run_single(cfg: dict, scenario_id: str, seed_index: int,
-               systems: list[str]) -> dict:
-    scenario = cfg["scenarios"][scenario_id]
-    sample_rate = int(cfg["sample_rate"])
+def detect_divergence(e: np.ndarray, d: np.ndarray,
+                      sample_rate: int) -> float | None:
+    """First time (s) where e goes non-finite or exceeds
+    DIVERGENCE_FACTOR * peak |d|; None if it never does."""
+    peak_d = float(np.max(np.abs(d)))
+    bad = ~np.isfinite(e) | (np.abs(e) > DIVERGENCE_FACTOR * peak_d)
+    idx = np.flatnonzero(bad)
+    if len(idx) == 0:
+        return None
+    return float(idx[0] / sample_rate)
 
-    rirs = build_rirs(cfg["room"], scenario["rt60_s"],
-                      scenario["speaker_mic_distance_m"], sample_rate)
-    sigs: SignalSet = synthesise(cfg, scenario, seed_index,
-                                 rirs.h_echo, rirs.h_near)
 
-    headroom_db = float(cfg["levels"]["int16_headroom_db"])
-    scale = compute_int16_scale([sigs.x, sigs.d], headroom_db)
+# ---------------------------------------------------------------------------
+# Per-cell preparation (shared across systems) and per-row processing
+# ---------------------------------------------------------------------------
 
-    run_dir = RUNS_DIR / scenario_id / f"seed{seed_index}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+def scenario_key(scenario: dict) -> str:
+    snr = scenario["snr_db"]
+    return (f"rt{scenario['rt60_s']:g}_d{scenario['speaker_mic_distance_m']:g}"
+            f"_{scenario['talk']}_{scenario['noise_type']}"
+            f"{'' if snr is None else f'_snr{snr:g}'}"
+            f"_ser{scenario['ser_db']:g}")
 
-    np.savez_compressed(
-        run_dir / "signals.npz",
-        x=sigs.x, d_echo=sigs.d_echo, s_clean=sigs.s_clean, s=sigs.s,
-        v=sigs.v, d=sigs.d, h_echo=rirs.h_echo, h_near=rirs.h_near,
-        far_mask=sigs.far_mask, near_mask=sigs.near_mask,
-        sample_rate=sample_rate,
-    )
 
-    def save_wav(name: str, sig: np.ndarray) -> None:
-        sf.write(run_dir / name, float_to_int16(sig, scale, name=name),
-                 sample_rate, subtype="PCM_16")
+def cell_noise_seed(key: str, seed: int) -> int:
+    return int.from_bytes(sha256(f"{key}|{seed}".encode()).digest()[:4], "big")
 
-    save_wav("x.wav", sigs.x)
-    save_wav("d.wav", sigs.d)
 
-    seg = segment(sigs.d_echo, sigs.s, sample_rate, cfg["segmentation"])
-    np.savez_compressed(
-        run_dir / "segmentation.npz",
-        frame_len=seg.frame_len,
-        far_active=seg.far_active,
-        near_active=seg.near_active,
-    )
+class BatchContext:
+    """In-memory caches: RIRs per (rt60, distance), signals per cell.
+
+    The signal cache is bounded (specs visit cells contiguously, so a
+    small window suffices); RIRs are tiny and kept for the whole batch.
+    """
+
+    _MAX_SIGNAL_CELLS = 4
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self._rirs: dict = {}
+        self._signals: dict = {}
+
+    def rirs(self, scenario: dict) -> RoomRirs:
+        k = (scenario["rt60_s"], scenario["speaker_mic_distance_m"])
+        if k not in self._rirs:
+            self._rirs[k] = build_rirs(self.cfg["room"], k[0], k[1],
+                                       int(self.cfg["sample_rate"]))
+        return self._rirs[k]
+
+    def signals(self, scenario: dict, seed: int) -> tuple[SignalSet, RoomRirs,
+                                                          Segmentation, float,
+                                                          Path]:
+        key = scenario_key(scenario)
+        k = (key, seed)
+        if k not in self._signals:
+            while len(self._signals) >= self._MAX_SIGNAL_CELLS:
+                self._signals.pop(next(iter(self._signals)))
+            cfg = self.cfg
+            sample_rate = int(cfg["sample_rate"])
+            rirs = self.rirs(scenario)
+            sigs = synthesise(cfg, scenario, seed, rirs.h_echo, rirs.h_near,
+                              noise_seed=cell_noise_seed(key, seed))
+            scale = compute_int16_scale(
+                [sigs.x, sigs.d], float(cfg["levels"]["int16_headroom_db"]))
+            seg = segment(sigs.d_echo, sigs.s, sample_rate,
+                          cfg["segmentation"])
+
+            cell_dir = RUNS_DIR / key / f"seed{seed}"
+            cell_dir.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                cell_dir / "signals.npz",
+                x=sigs.x, d_echo=sigs.d_echo, s_clean=sigs.s_clean, s=sigs.s,
+                v=sigs.v, d=sigs.d, h_echo=rirs.h_echo, h_near=rirs.h_near,
+                far_mask=sigs.far_mask, near_mask=sigs.near_mask,
+                sample_rate=sample_rate,
+            )
+            np.savez_compressed(
+                cell_dir / "segmentation.npz", frame_len=seg.frame_len,
+                far_active=seg.far_active, near_active=seg.near_active)
+            for name, sig in [("x.wav", sigs.x), ("d.wav", sigs.d)]:
+                sf.write(cell_dir / name, float_to_int16(sig, scale, name),
+                         sample_rate, subtype="PCM_16")
+            with open(cell_dir / "cell_meta.json", "w") as f:
+                json.dump({
+                    "scenario": scenario, "seed": seed,
+                    "int16_scale": scale,
+                    "rt60_target_s": rirs.rt60_target_s,
+                    "rt60_achieved_echo_s": rirs.rt60_achieved_echo_s,
+                    "rt60_achieved_near_s": rirs.rt60_achieved_near_s,
+                    "calibration": rirs.calibration,
+                    "geometry": rirs.geometry,
+                    "signals": sigs.meta,
+                }, f, indent=2)
+            self._signals[k] = (sigs, rirs, seg, scale, cell_dir)
+        return self._signals[k]
+
+
+def system_metrics(cfg: dict, sigs: SignalSet, seg: Segmentation,
+                   e: np.ndarray, extras: dict, rirs: RoomRirs,
+                   sample_rate: int, record_every: int | None
+                   ) -> tuple[dict, dict]:
+    """Compute the full metric set for one system output."""
     met_cfg = cfg["metrics"]
     frame_times = seg.frame_times_s()
-    has_double_talk = bool(np.any(seg.double_talk))
+    erle = metrics.erle_curve(
+        sigs.d, e, seg.erle_valid, seg.frame_len,
+        ema_alpha=float(met_cfg["erle_ema_alpha"]),
+        steady_state_last_fraction=float(met_cfg["steady_state_last_fraction"]),
+        sanity_max_db=float(met_cfg["erle_sanity_max_db"]),
+    )
+    conv_t = metrics.convergence_time_s(
+        erle["erle_smoothed_db"], seg.erle_valid, erle["steady_state_db"],
+        frame_times, float(met_cfg["convergence_fraction"]))
 
-    results: dict = {}
-    metrics_out: dict = {}
-    for system in systems:
-        e, sys_meta, extras = SYSTEM_RUNNERS[system](sigs.x, sigs.d, scale,
-                                                     cfg, sample_rate)
-        np.savez_compressed(run_dir / f"e_{system}.npz", e=e, **extras)
-        save_wav(f"e_{system}.wav", e)
-        results[system] = sys_meta
+    entry: dict = {
+        "erle_steady_state_db": erle["steady_state_db"],
+        "erle_n_valid_frames": erle["n_valid_frames"],
+        "convergence_time_s": None if np.isnan(conv_t) else conv_t,
+        "converged": bool(np.isfinite(conv_t)),
+    }
+    arrays: dict = {
+        "frame_times_s": frame_times,
+        "erle_db": erle["erle_db"],
+        "erle_smoothed_db": erle["erle_smoothed_db"],
+    }
 
-        erle = metrics.erle_curve(
-            sigs.d, e, seg.erle_valid, seg.frame_len,
-            ema_alpha=float(met_cfg["erle_ema_alpha"]),
-            steady_state_last_fraction=float(
-                met_cfg["steady_state_last_fraction"]),
-            sanity_max_db=float(met_cfg["erle_sanity_max_db"]),
-        )
-        conv_t = metrics.convergence_time_s(
-            erle["erle_smoothed_db"], seg.erle_valid,
-            erle["steady_state_db"], frame_times,
-            float(met_cfg["convergence_fraction"]),
-        )
-        entry: dict = {
-            "erle_steady_state_db": erle["steady_state_db"],
-            "erle_n_valid_frames": erle["n_valid_frames"],
-            "convergence_time_s": None if np.isnan(conv_t) else conv_t,
-            "converged": bool(np.isfinite(conv_t)),
-        }
+    # Near-end distortion: over double-talk frames when both sources are
+    # active; for near-single-talk (no far activity at all) over
+    # near-active frames, where it degenerates to plain passthrough
+    # distortion. The condition is identifiable from the scenario columns.
+    if np.any(seg.double_talk):
+        distortion_mask = seg.double_talk
+    elif np.any(seg.near_active) and not np.any(seg.far_active):
+        distortion_mask = seg.near_active
+    else:
+        distortion_mask = None
+    if distortion_mask is not None:
+        segsnr = metrics.segmental_snr_db(sigs.s, e, distortion_mask,
+                                          seg.frame_len)
+        lsd = metrics.log_spectral_distance_db(
+            sigs.s, e, distortion_mask, seg.frame_len,
+            floor_db=float(met_cfg["lsd_floor_db"]))
+        near_idx = np.flatnonzero(seg.near_active)
+        span = slice(near_idx[0] * seg.frame_len,
+                     (near_idx[-1] + 1) * seg.frame_len)
+        quality = metrics.speech_quality_scores(sigs.s[span], e[span],
+                                                sample_rate)
+        entry.update({
+            "segsnr_db": segsnr["segsnr_db"],
+            "lsd_db": lsd["lsd_db"],
+            "stoi": quality.get("stoi"),
+            "pesq_wb": quality.get("pesq_wb"),
+        })
 
-        metric_arrays: dict = {
-            "frame_times_s": frame_times,
-            "erle_db": erle["erle_db"],
-            "erle_smoothed_db": erle["erle_smoothed_db"],
-        }
+    if "w_final" in extras:
+        entry["misalignment_final_db"] = metrics.misalignment_db(
+            extras["w_final"], rirs.h_echo)
+        if "w_traj" in extras and record_every:
+            arrays["misalignment_curve_db"] = metrics.misalignment_curve_db(
+                extras["w_traj"], rirs.h_echo)
+            arrays["misalignment_times_s"] = (
+                (np.arange(len(extras["w_traj"])) + 1)
+                * record_every / sample_rate)
+    return entry, arrays
 
-        if has_double_talk:
-            segsnr = metrics.segmental_snr_db(sigs.s, e, seg.double_talk,
-                                              seg.frame_len)
-            lsd = metrics.log_spectral_distance_db(
-                sigs.s, e, seg.double_talk, seg.frame_len,
-                floor_db=float(met_cfg["lsd_floor_db"]))
-            near_idx = np.flatnonzero(seg.near_active)
-            span = slice(near_idx[0] * seg.frame_len,
-                         (near_idx[-1] + 1) * seg.frame_len)
-            quality = metrics.speech_quality_scores(sigs.s[span], e[span],
-                                                    sample_rate)
-            entry.update({
-                "double_talk_segsnr_db": segsnr["segsnr_db"],
-                "double_talk_segsnr_n_frames": segsnr["n_frames"],
-                "double_talk_lsd_db": lsd["lsd_db"],
-                **quality,
-            })
 
-        if "w_final" in extras:
-            entry["misalignment_final_db"] = metrics.misalignment_db(
-                extras["w_final"], rirs.h_echo)
-            if "w_traj" in extras:
-                record_every = int(
-                    cfg["systems"][system]["record_every"])
-                metric_arrays["misalignment_curve_db"] = (
-                    metrics.misalignment_curve_db(extras["w_traj"],
-                                                  rirs.h_echo))
-                metric_arrays["misalignment_times_s"] = (
-                    (np.arange(len(extras["w_traj"])) + 1)
-                    * record_every / sample_rate)
+def process_row(ctx: BatchContext, spec: dict, sha: str) -> dict:
+    """Run one (scenario, seed, system) triple; always returns a CSV row."""
+    cfg = ctx.cfg
+    sample_rate = int(cfg["sample_rate"])
+    scenario = spec["scenario"]
+    key = scenario_key(scenario)
+    row: dict = {
+        "run_id": spec["run_id"],
+        "stage": spec["stage"],
+        "axis": spec["axis"],
+        "level": spec["level"],
+        "scenario_key": key,
+        "seed": spec["seed"],
+        "system": spec["system"],
+        "status": "ok",
+        "fail_reason": "",
+        "talk": scenario["talk"],
+        "noise_type": scenario["noise_type"],
+        "snr_db": scenario["snr_db"],
+        "ser_db": scenario["ser_db"],
+        "rt60_target_s": scenario["rt60_s"],
+        "speaker_mic_distance_m": scenario["speaker_mic_distance_m"],
+        "git_sha": sha,
+    }
+    t0 = time.perf_counter()
+    try:
+        sigs, rirs, seg, scale, cell_dir = ctx.signals(scenario, spec["seed"])
+        sys_params = merged_sys_params(cfg, spec["system"],
+                                       spec.get("overrides", {}))
+        if not spec.get("record_traj", False):
+            sys_params["record_every"] = None
+        row.update({
+            "rt60_achieved_echo_s": rirs.rt60_achieved_echo_s,
+            "rt60_achieved_near_s": rirs.rt60_achieved_near_s,
+            "absorption_calibrated": rirs.calibration[
+                "absorption_calibrated"],
+            "absorption_sabine_init": rirs.calibration[
+                "absorption_sabine_init"],
+            "int16_scale": scale,
+            "int16_headroom_db": cfg["levels"]["int16_headroom_db"],
+            "filter_length_ms": sys_params.get("filter_length_ms"),
+            "mu": sys_params.get("mu") if spec["system"] == "nlms_f64" else None,
+            "frame_size": sys_params.get("frame_size")
+            if spec["system"] == "speex" else None,
+            "far_speaker": sigs.meta.get("far_speaker"),
+            "near_speaker": sigs.meta.get("near_speaker"),
+        })
 
-        np.savez_compressed(run_dir / f"metrics_{system}.npz",
-                            **metric_arrays)
-        metrics_out[system] = entry
+        e, _sys_meta, extras = SYSTEM_RUNNERS[spec["system"]](
+            sigs.x, sigs.d, scale, sys_params, sample_rate)
 
-    meta = {
-        "scenario_id": scenario_id,
+        label = spec["output_label"]
+        np.savez_compressed(cell_dir / f"e_{label}.npz", e=e, **extras)
+
+        div_t = detect_divergence(e, sigs.d, sample_rate)
+        if div_t is not None:
+            row["status"] = "diverged"
+            row["divergence_time_s"] = div_t
+
+        entry, arrays = system_metrics(
+            cfg, sigs, seg, e, extras, rirs, sample_rate,
+            sys_params.get("record_every"))
+        np.savez_compressed(cell_dir / f"metrics_{label}.npz", **arrays)
+        row.update({k: v for k, v in entry.items() if k in CSV_FIELDS})
+    except Exception as exc:  # noqa: BLE001 - row records the failure
+        if row["status"] == "ok":
+            row["status"] = "failed"
+        row["fail_reason"] = f"{type(exc).__name__}: {exc}"
+    row["wall_time_s"] = round(time.perf_counter() - t0, 3)
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Matrix expansion
+# ---------------------------------------------------------------------------
+
+def _make_spec(stage: str, axis: str, level: str, scenario: dict, seed: int,
+               system: str, overrides: dict | None = None,
+               record_traj: bool = False) -> dict:
+    overrides = overrides or {}
+    suffix = "".join(f"_{k}{v:g}" if isinstance(v, (int, float)) else ""
+                     for k, v in sorted(overrides.items()))
+    return {
+        "stage": stage,
+        "axis": axis,
+        "level": level,
         "scenario": scenario,
-        "seed_index": seed_index,
-        "sample_rate": sample_rate,
-        "rt60_target_s": rirs.rt60_target_s,
-        "rt60_achieved_echo_s": rirs.rt60_achieved_echo_s,
-        "rt60_achieved_near_s": rirs.rt60_achieved_near_s,
-        "rt60_calibration": rirs.calibration,
-        "geometry": rirs.geometry,
-        "int16_scale": scale,
-        "int16_headroom_db": headroom_db,
-        "signals": sigs.meta,
-        "systems": results,
+        "seed": seed,
+        "system": system,
+        "overrides": overrides,
+        "record_traj": record_traj,
+        "output_label": f"{system}{suffix}",
+        "run_id": f"{stage}.{axis}.{level}.s{seed}.{system}{suffix}",
     }
-    with open(run_dir / "run_meta.json", "w") as f:
-        json.dump(meta, f, indent=2)
-
-    metrics_json = {
-        "scenario_id": scenario_id,
-        "seed_index": seed_index,
-        "has_double_talk": has_double_talk,
-        "systems": metrics_out,
-    }
-    with open(run_dir / "metrics.json", "w") as f:
-        json.dump(metrics_json, f, indent=2)
-    meta["metrics"] = metrics_json
-    return meta
 
 
-def _print_diagnostics(meta: dict) -> None:
-    geo = meta["geometry"]
-    print(f"\n=== {meta['scenario_id']} / seed {meta['seed_index']} ===")
-    print(f"RT60 target {meta['rt60_target_s']:.2f} s | achieved "
-          f"echo {meta['rt60_achieved_echo_s']:.3f} s, "
-          f"near {meta['rt60_achieved_near_s']:.3f} s")
-    print(f"h_echo first arrival: sample {geo['h_echo_first_arrival_sample']} "
-          f"(expected direct delay {geo['expected_direct_delay_samples']:.1f} "
-          f"+ ISM fractional-delay offset)")
-    print(f"h_echo peak: {geo['h_echo_peak_value']:.4f} at sample "
-          f"{geo['h_echo_peak_sample']}")
-    print(f"int16 scale: {meta['int16_scale']:.1f} "
-          f"(headroom {meta['int16_headroom_db']} dB)")
-    for system, entry in meta["metrics"]["systems"].items():
-        conv = entry["convergence_time_s"]
+def expand_batch(cfg: dict) -> list[dict]:
+    batch = cfg["batch"]
+    defaults = cfg["scenario_defaults"]
+    n_seeds = int(cfg["speech"]["n_seeds"])
+    specs: list[dict] = []
+
+    def record_traj(scenario: dict, system: str, overrides: dict) -> bool:
+        # Trajectory recording is tied to the baseline cell with default
+        # system parameters. Every spec matching it must set the flag,
+        # because equal cells share one output file — a later run of the
+        # same (cell, system, params) without the flag would overwrite the
+        # trajectory away.
+        return (system == "nlms_f64" and not overrides
+                and scenario == defaults)
+
+    a = batch["stage_a"]
+    for rt60 in a["rt60_levels_s"]:
+        for dist in a["distance_levels_m"]:
+            scenario = dict(a["scenario"])
+            scenario["rt60_s"] = rt60
+            scenario["speaker_mic_distance_m"] = dist
+            level = f"rt{rt60:g}_d{dist:g}"
+            for seed in range(n_seeds):
+                for system in a["systems"]:
+                    specs.append(_make_spec(
+                        "a", "rt60_distance", level, scenario, seed, system,
+                        record_traj=record_traj(scenario, system, {})))
+
+    b = batch["stage_b"]
+    for talk in b["talk"]["levels"]:
+        scenario = dict(defaults)
+        scenario["talk"] = talk
+        for seed in range(n_seeds):
+            for system in b["talk"]["systems"]:
+                specs.append(_make_spec(
+                    "b", "talk", talk, scenario, seed, system,
+                    record_traj=record_traj(scenario, system, {})))
+
+    for lvl in b["noise"]["levels"]:
+        scenario = dict(defaults)
+        scenario["noise_type"] = lvl["noise_type"]
+        scenario["snr_db"] = lvl["snr_db"]
+        level = ("no_noise" if lvl["noise_type"] == "none"
+                 else f"snr{lvl['snr_db']:g}")
+        for seed in range(n_seeds):
+            for system in b["noise"]["systems"]:
+                specs.append(_make_spec(
+                    "b", "noise", level, scenario, seed, system,
+                    record_traj=record_traj(scenario, system, {})))
+
+    for ms in b["tail_length"]["levels_ms"]:
+        scenario = dict(defaults)
+        for seed in range(n_seeds):
+            for system in b["tail_length"]["systems"]:
+                specs.append(_make_spec(
+                    "b", "tail_length", f"{ms:g}ms", scenario, seed, system,
+                    overrides={"filter_length_ms": ms}))
+
+    for mu in b["mu"]["levels"]:
+        scenario = dict(defaults)
+        for seed in range(n_seeds):
+            for system in b["mu"]["systems"]:
+                specs.append(_make_spec("b", "mu", f"mu{mu:g}", scenario,
+                                        seed, system, overrides={"mu": mu}))
+    for seed in range(n_seeds):
+        for system in b["mu"].get("reference_systems", []):
+            specs.append(_make_spec("b", "mu", "reference", dict(defaults),
+                                    seed, system))
+
+    run_ids = [s["run_id"] for s in specs]
+    if len(run_ids) != len(set(run_ids)):
+        raise AssertionError("duplicate run IDs in expanded batch")
+    return specs
+
+
+# ---------------------------------------------------------------------------
+# Batch driver
+# ---------------------------------------------------------------------------
+
+def run_batch(cfg: dict) -> Path:
+    specs = expand_batch(cfg)
+    sha = git_sha()
+    out_csv = RAW_DIR / "runs.csv"
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+
+    t_start = time.perf_counter()
+    ctx = BatchContext(cfg)
+    n_bad = 0
+    with open(out_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, restval="")
+        writer.writeheader()
+        for i, spec in enumerate(specs, 1):
+            row = process_row(ctx, spec, sha)
+            writer.writerow(row)
+            f.flush()
+            marker = "" if row["status"] == "ok" else \
+                f"  [{row['status'].upper()}] {row['fail_reason']}"
+            print(f"[{i:3d}/{len(specs)}] {row['run_id']:<50} "
+                  f"{row['wall_time_s']:6.2f}s{marker}")
+            if row["status"] != "ok":
+                n_bad += 1
+
+    total_s = time.perf_counter() - t_start
+    with open(out_csv) as f:
+        n_rows = sum(1 for _ in f) - 1
+    if n_rows != len(specs):
+        raise AssertionError(
+            f"CSV has {n_rows} rows, expected {len(specs)} — silent gap")
+    print(f"\nbatch complete: {n_rows} rows ({n_bad} not ok) in "
+          f"{total_s / 60:.1f} min -> {out_csv}")
+    return out_csv
+
+
+# ---------------------------------------------------------------------------
+# Single-run debug mode
+# ---------------------------------------------------------------------------
+
+def run_single(cfg: dict, scenario_id: str, seed: int,
+               systems: list[str]) -> None:
+    scenario = cfg["scenarios"][scenario_id]
+    ctx = BatchContext(cfg)
+    sha = git_sha()
+    for system in systems:
+        spec = _make_spec("single", scenario_id, scenario_id, scenario, seed,
+                          system, record_traj=(system == "nlms_f64"))
+        row = process_row(ctx, spec, sha)
+        conv = row.get("convergence_time_s")
         conv_str = f"{conv:.2f} s" if conv is not None else "not converged"
-        line = (f"{system:>8}: steady-state ERLE "
-                f"{entry['erle_steady_state_db']:5.1f} dB | "
-                f"convergence {conv_str}")
-        if "double_talk_segsnr_db" in entry:
-            line += f" | DT segSNR {entry['double_talk_segsnr_db']:.1f} dB"
-        if "misalignment_final_db" in entry:
-            line += f" | misalign {entry['misalignment_final_db']:.1f} dB"
+        erle_ss = row.get("erle_steady_state_db")
+        erle_str = f"{erle_ss:5.1f} dB" if erle_ss is not None and \
+            np.isfinite(erle_ss) else "  n/a"
+        line = (f"{system:>8}: [{row['status']}] steady-state ERLE {erle_str}"
+                f" | convergence {conv_str}")
+        if row.get("misalignment_final_db") is not None:
+            line += f" | misalign {row['misalignment_final_db']:.1f} dB"
+        if row["fail_reason"]:
+            line += f" | {row['fail_reason']}"
         print(line)
+    _, rirs, _, scale, _ = ctx.signals(scenario, seed)
+    print(f"RT60 target {rirs.rt60_target_s:.2f} s achieved "
+          f"{rirs.rt60_achieved_echo_s:.3f} s | int16 scale {scale:.1f}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", required=True)
+    parser.add_argument("--batch", action="store_true",
+                        help="run the full experiment matrix")
+    parser.add_argument("--scenario")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--systems", nargs="+",
                         default=["none", "nlms_f64", "speex"],
@@ -298,11 +592,14 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config()
-    if args.scenario not in cfg["scenarios"]:
-        parser.error(f"unknown scenario {args.scenario!r}; defined: "
-                     f"{sorted(cfg['scenarios'])}")
-    meta = run_single(cfg, args.scenario, args.seed, args.systems)
-    _print_diagnostics(meta)
+    if args.batch:
+        run_batch(cfg)
+    elif args.scenario:
+        if args.scenario not in cfg["scenarios"]:
+            parser.error(f"unknown scenario {args.scenario!r}")
+        run_single(cfg, args.scenario, args.seed, args.systems)
+    else:
+        parser.error("pass --batch or --scenario")
 
 
 if __name__ == "__main__":

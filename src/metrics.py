@@ -109,21 +109,30 @@ def segmental_snr_db(ref: np.ndarray, est: np.ndarray,
     """Mean per-frame SNR of est against ref over the masked frames.
 
     Frames where ref has zero power are excluded (and counted): SNR is
-    undefined there. No per-frame clamping is applied; the per-frame
-    values are returned so outliers stay visible.
+    undefined there. Frames with exactly zero error (bit-exact
+    passthrough) are likewise excluded and counted — they carry no finite
+    SNR; if every usable frame is error-free the result is +inf, not a
+    floor-dependent large number. No per-frame clamping is applied; the
+    per-frame values are returned so outliers stay visible.
     """
     p_ref = frame_power(ref, frame_len)
     p_err = frame_power(ref - est, frame_len)
     idx = np.flatnonzero(frames_mask[: len(p_ref)])
-    usable = idx[p_ref[idx] > 0.0]
-    with np.errstate(divide="ignore"):
-        per_frame = 10.0 * np.log10(p_ref[usable] / np.maximum(p_err[usable],
-                                                               1e-300))
+    nonzero_ref = idx[p_ref[idx] > 0.0]
+    usable = nonzero_ref[p_err[nonzero_ref] > 0.0]
+    per_frame = 10.0 * np.log10(p_ref[usable] / p_err[usable])
+    if len(usable):
+        segsnr = float(np.mean(per_frame))
+    elif len(nonzero_ref):
+        segsnr = float("inf")   # every frame reproduced exactly
+    else:
+        segsnr = float("nan")
     return {
-        "segsnr_db": float(np.mean(per_frame)) if len(per_frame) else float("nan"),
+        "segsnr_db": segsnr,
         "per_frame_db": per_frame,
         "n_frames": int(len(usable)),
-        "n_excluded_zero_ref": int(len(idx) - len(usable)),
+        "n_excluded_zero_ref": int(len(idx) - len(nonzero_ref)),
+        "n_excluded_zero_error": int(len(nonzero_ref) - len(usable)),
     }
 
 

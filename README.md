@@ -8,22 +8,37 @@ configurations. All signals are synthesised (LibriSpeech speech material
 convolved with simulated room impulse responses); no real recordings are
 involved.
 
-**Status: single-scenario pipeline working.** Room simulation, signal
-synthesis, and the SpeexDSP canceller run end to end on the baseline scenario:
+**Status: full T0 matrix running.** The complete two-stage experiment
+matrix (Stage A: RT60 × speaker–mic distance main effects; Stage B: talk
+state, background noise, tail length, and NLMS step size, one factor at a
+time) runs as a single batch:
+
+```bash
+python src/run_experiment.py --batch
+```
+
+Each (scenario, seed, system) triple becomes one row in
+`results/raw/runs.csv`, with metrics (segmented ERLE, convergence time,
+double-talk distortion, coefficient misalignment), provenance (achieved
+RT60, calibrated absorption, scaling constant, git SHA), status
+(ok/diverged/failed), and wall time. Figures aggregate from that CSV only:
+
+```bash
+python -c "from pathlib import Path; import sys; sys.path.insert(0, 'src'); \
+  from plotting import batch_figures; \
+  batch_figures(Path('results/raw/runs.csv'), Path('results/figures'))"
+```
+
+Single-cell debug runs remain available:
 
 ```bash
 python src/run_experiment.py --scenario baseline --seed 0
 ```
 
-This generates the room impulse responses (wall absorption calibrated per
-RT60 level against Schroeder-measured RT60, with `inverse_sabine` as the
-initialisation), synthesises the microphone signal, runs each system
-(`none`, `nlms_f64`, `speex`), computes metrics (segmented ERLE, convergence
-time, double-talk distortion, coefficient misalignment) over a three-state
-activity segmentation, and persists every intermediate signal, metric array,
-and figure input under `data/generated/`. The batch driver for the full
-experiment matrix is being added next; aggregated results will live in
-`results/`.
+Room simulation calibrates wall absorption per RT60 level against
+Schroeder-measured RT60 (with `inverse_sabine` as initialisation only);
+every intermediate signal is persisted under `data/generated/`. The
+report (`results/report.md`) is the remaining deliverable for this tier.
 
 ## Setup
 

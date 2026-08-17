@@ -207,7 +207,15 @@ class SignalSet:
 
 
 def synthesise(cfg: dict, scenario: dict, seed_index: int,
-               h_echo: np.ndarray, h_near: np.ndarray) -> SignalSet:
+               h_echo: np.ndarray, h_near: np.ndarray,
+               noise_seed: int | None = None) -> SignalSet:
+    """Build the full signal set for one (scenario, seed) cell.
+
+    noise_seed overrides the default derived noise stream — the batch
+    driver passes a value derived from the cell identity so the noise
+    realisation is deterministic per cell and, critically, identical for
+    every system evaluated on that cell.
+    """
     sample_rate = int(cfg["sample_rate"])
     duration_s = float(cfg["duration_s"])
     n = int(round(duration_s * sample_rate))
@@ -238,7 +246,8 @@ def synthesise(cfg: dict, scenario: dict, seed_index: int,
     base = [int(speech_cfg["speaker_selection_seed"]), seed_index]
     far_rng = np.random.default_rng(base + [1])
     near_rng = np.random.default_rng(base + [2])
-    noise_rng = np.random.default_rng(base + [3])
+    noise_rng = np.random.default_rng(
+        base + [3] if noise_seed is None else [noise_seed])
 
     reference_speech = []  # for speech-shaped noise spectrum
 
