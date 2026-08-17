@@ -8,10 +8,19 @@ configurations. All signals are synthesised (LibriSpeech speech material
 convolved with simulated room impulse responses); no real recordings are
 involved.
 
-**Status: early setup.** Environment, SpeexDSP binding, and speech-data
-fetching are in place. Scenario simulation, the AEC implementations under a
-common interface, metrics, and the experiment matrix are being added
-incrementally; results will live in `results/`.
+**Status: single-scenario pipeline working.** Room simulation, signal
+synthesis, and the SpeexDSP canceller run end to end on the baseline scenario:
+
+```bash
+python src/run_experiment.py --scenario baseline --seed 0
+```
+
+This generates the room impulse responses, synthesises the microphone signal,
+runs each system, persists every intermediate signal under `data/generated/`,
+and prints sanity diagnostics (achieved RT60, direct-path delay, scaling
+constant, echo reduction). The NLMS implementation, metrics, and the full
+experiment matrix are being added incrementally; results will live in
+`results/`.
 
 ## Setup
 
@@ -43,7 +52,7 @@ Speech material is the LibriSpeech `test-clean` subset (~346 MB download,
 md5-verified):
 
 ```bash
-python src/fetch_data.py
+python scripts/fetch_data.py
 ```
 
 Data lands in `data/` (gitignored, never committed).
@@ -57,8 +66,9 @@ python -m pytest tests/
 ## Layout
 
 ```
-config/scenarios.yaml   experiment matrix — single source of truth (pending)
+config/scenarios.yaml   experiment matrix — single source of truth
 src/                    library code and batch entry point
+scripts/                one-off setup commands (data fetch)
 tests/                  unit and smoke tests
 data/                   fetched + generated audio (gitignored)
 results/                metric CSVs, figures, report (pending)

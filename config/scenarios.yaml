@@ -1,0 +1,84 @@
+# Experiment configuration — single source of truth for the benchmark.
+# No scenario parameter may be hardcoded in Python; everything the pipeline
+# needs to construct a run is defined here.
+
+sample_rate: 16000
+duration_s: 15.0
+
+room:
+  dimensions_m: [5.0, 4.0, 3.0]     # typical meeting room
+  # Mic deliberately off-centre: no coordinate sits at a half-dimension of
+  # the room, avoiding degenerate image-source symmetry.
+  mic_position_m: [1.2, 1.7, 1.2]
+  loudspeaker:
+    # Placed at scenario-defined distance from the mic, along an azimuth
+    # slightly off the +x axis (so the source is never exactly axis-aligned
+    # with the mic), slightly below head height.
+    azimuth_deg: 10.0
+    height_m: 1.1
+  near_talker:
+    azimuth_deg: 110.0
+    distance_m: 1.0
+    height_m: 1.2
+  min_wall_clearance_m: 0.5
+
+speech:
+  dataset_dir: data/speech/LibriSpeech/test-clean
+  n_seeds: 3
+  # Seeds the reproducible draw of disjoint (far, near) speaker pairs and the
+  # per-speaker utterance ordering. Recorded file IDs land in each run's
+  # metadata.
+  speaker_selection_seed: 20250817
+
+levels:
+  # Simplified active-level measure (energy-gated RMS, not ITU-T P.56):
+  # frames whose RMS is more than active_gate_threshold_db below the peak
+  # frame RMS are treated as inactive.
+  active_level_dbov: -26.0
+  active_gate_frame_ms: 20.0
+  active_gate_threshold_db: 40.0
+  # One float->int16 scaling constant per run, shared by every system in the
+  # run, chosen so max(|x|, |d|) sits this far below full scale.
+  int16_headroom_db: 6.0
+
+# Talk-state timelines: active intervals in seconds for each source.
+# double keeps a far-only lead-in (adaptation), a double-talk region, and a
+# far-only tail so steady-state statistics are measured post-double-talk.
+timelines:
+  far_single:
+    far: [[0.0, 15.0]]
+    near: []
+  double:
+    far: [[0.0, 15.0]]
+    near: [[4.0, 11.0]]
+  near_single:
+    far: []
+    near: [[0.0, 15.0]]
+
+noise:
+  # Speech-shaped noise is white noise filtered to the long-term average
+  # spectrum of the selected LibriSpeech material for the run.
+  spectrum_nperseg: 1024
+  filter_taps: 513
+
+systems:
+  none: {}                  # explicit int16 round-trip at the run's scale
+  speex:
+    frame_size: 160         # 10 ms at 16 kHz; every tail length divides it
+    filter_length_ms: 200.0
+  nlms_f64:
+    filter_length_ms: 200.0
+    mu: 0.5
+    delta: 1.0e-6
+
+scenario_defaults: &defaults
+  rt60_s: 0.4
+  speaker_mic_distance_m: 1.0
+  talk: far_single
+  noise_type: none          # none | speech_shaped | white
+  snr_db: null
+  ser_db: 0.0               # near-end over echo, measured on the overlap
+
+scenarios:
+  baseline:
+    <<: *defaults

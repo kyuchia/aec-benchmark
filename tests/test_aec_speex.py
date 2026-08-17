@@ -5,15 +5,12 @@ run_speex_aec and checks that (a) output is well-formed and (b) the
 echo is substantially attenuated once the filter has had time to adapt.
 """
 
-import sys
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from aec_speex import run_speex_aec  # noqa: E402
+from aec_speex import run_speex_aec
 
 SAMPLE_RATE = 16000
 FRAME_SIZE = 160
