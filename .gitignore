@@ -1,0 +1,20 @@
+# Environments
+.venv/
+
+# Python artefacts
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Data: everything under data/ is fetched or generated, never committed
+data/
+
+# Audio files anywhere in the tree
+*.wav
+*.flac
+*.mp3
+*.ogg
+*.tar.gz
+
+# OS noise
+.DS_Store
