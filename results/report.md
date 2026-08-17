@@ -7,7 +7,7 @@ synthesised room-acoustic scenarios. 201 runs
 6 diverged (all unprotected-NLMS runs; §2.4). All numbers in
 this report are rendered from `results/raw/*.csv` by
 `scripts/render_report.py`; run provenance (git SHA per row):
-a1289ff-dirty.
+661d21a.
 
 ## 1. Method
 
