@@ -545,9 +545,26 @@ def run_batch(cfg: dict) -> Path:
     if n_rows != len(specs):
         raise AssertionError(
             f"CSV has {n_rows} rows, expected {len(specs)} — silent gap")
+
+    _write_calibration_csv(ctx)
     print(f"\nbatch complete: {n_rows} rows ({n_bad} not ok) in "
           f"{total_s / 60:.1f} min -> {out_csv}")
     return out_csv
+
+
+def _write_calibration_csv(ctx: BatchContext) -> None:
+    """RT60 calibration provenance, one row per level, for the report."""
+    fields = ["rt60_target_s", "absorption_sabine_init",
+              "rt60_achieved_sabine_init_s", "absorption_calibrated",
+              "rt60_achieved_calibrated_s", "reference_distance_m",
+              "tolerance_pct", "max_order"]
+    by_target = {r.calibration["rt60_target_s"]: r.calibration
+                 for r in ctx._rirs.values()}
+    with open(RAW_DIR / "calibration.csv", "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for target in sorted(by_target):
+            writer.writerow(by_target[target])
 
 
 # ---------------------------------------------------------------------------
