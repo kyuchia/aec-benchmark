@@ -364,7 +364,10 @@ is therefore a statement about a magnitude-truncating, floor-masked
 implementation; a round-to-nearest implementation would stall less and
 behave differently. This is a scope statement, not a weakness — but it
 means fixed-point conclusions do not transfer across rounding
-conventions.
+conventions. The floor-truncating implementation is preserved in the
+repository's git history (the commit introducing `aec_nlms_fixed.py`
+carries it; the following commit switches the arithmetic-path
+convention) for anyone who wants to reproduce the failure.
 
 One float→int16 scaling constant per run, computed to leave
 {lvl_cfg["int16_headroom_db"]:g} dB headroom above max(|x|, |d|), applied
