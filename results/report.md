@@ -1,13 +1,16 @@
-# AEC benchmark — Tier 0 report
+# AEC benchmark — report (Tier 0 + Tier 1 fixed point)
 
-Comparison of a float64 NLMS adaptive filter (`nlms_f64`) and the SpeexDSP
-MDF echo canceller (`speex`) against a passthrough reference (`none`) on
-synthesised room-acoustic scenarios. 201 runs
-(3 utterance-pair seeds per condition); 195 completed normally,
-6 diverged (all unprotected-NLMS runs; §2.4). All numbers in
-this report are rendered from `results/raw/*.csv` by
-`scripts/render_report.py`; run provenance (git SHA per row):
-661d21a.
+Comparison of a float64 NLMS adaptive filter (`nlms_f64`), a Q15
+fixed-point NLMS (`nlms_q15`), and the SpeexDSP MDF echo canceller
+(`speex`) against a passthrough reference (`none`) on synthesised
+room-acoustic scenarios. 279 runs (3 utterance-pair seeds
+per condition); 273 completed normally, 6 diverged
+(all `nlms_f64`; §2.4 — the fixed-point system cannot trip the divergence
+detector at all, see §2.8). Tier 1 coverage so far: fixed-point
+arithmetic and the word-length sweep (M7); perceptual audibility (M8)
+and computational cost (M9) follow. All numbers in this report are
+rendered from `results/raw/*.csv` by `scripts/render_report.py`; run
+provenance (git SHA per row): c945803.
 
 ## 1. Method
 
@@ -82,6 +85,29 @@ achieved values are stored in every CSV row.
 | `none` | Passthrough reference. Not a no-op: `d` goes through the identical float→int16→float round-trip at the identical scaling constant as `speex`, so the 0 dB reference is measured on the same signal path and carries the same quantisation floor. |
 | `nlms_f64` | Sample-wise float64 NLMS, L = 200 ms (3200 taps), μ = 0.5, δ = 1e-06. **No double-talk detection, deliberately** — its absence is what makes SpeexDSP's built-in protection visible. Verified sample-exact against a naive per-sample reference. |
 | `speex` | SpeexDSP MDF, frame size 160 samples, tail 200 ms, sampling rate set explicitly via `speex_echo_ctl` and read back (asserted). |
+| `nlms_q15` | Q15 fixed-point re-implementation of the same NLMS recursion (Tier 1): int16/Q15 coefficients, Q15×Q15→Q30 products accumulated in int64, **saturating** narrowing at every return to 16 bits with per-site event counting. ‖x‖² normalisation is block floating point: the window power is an exact integer sliding-window sum in Q30 (no cancellation, unlike the float path's guarded cumulative sum), and one reciprocal per sample is taken on a 15-bit mantissa with the exponent tracked and folded into the gain shift. μ = 0.5 as the Q15 constant 16384, δ = 1e-06 as the Q30 constant 1074. Bit-exact against a pure-Python unbounded-integer reference executing the same arithmetic naively. Runs on the identical int16 signals and scaling constant as `speex`/`none`; an in-loop float64 shadow filter fed the same quantised input records per-sample coefficient divergence (§1.4). |
+
+**Rounding convention (load-bearing).** In `nlms_q15`, every product
+narrowing — filter output, gain, per-tap update — uses **magnitude
+truncation** (shift toward zero), matching the spec's description of
+sub-LSB updates truncating to zero; the word-length mask (§2.7) keeps
+the plain floor `>>`/`<<` semantics of the spec's masking snippet. The
+choice is not cosmetic: a floor-truncating (arithmetic-shift) update
+path was implemented first and fails outright at full 15-bit precision
+on real speech — floor biases every update by −0.5 LSB in the mean, and
+during speech pauses the error feedback is too weak to oppose the
+accumulating drift, which drove the mean coefficient to roughly
+two-thirds of the negative rail on the baseline scenario (positive
+misalignment, negative ERLE, before any masking; mechanism documented
+in `src/aec_nlms_fixed.py`). Every stalling and saturation result below
+is therefore a statement about a magnitude-truncating, floor-masked
+implementation; a round-to-nearest implementation would stall less and
+behave differently. This is a scope statement, not a weakness — but it
+means fixed-point conclusions do not transfer across rounding
+conventions. The floor-truncating implementation is preserved in the
+repository's git history (the commit introducing `aec_nlms_fixed.py`
+carries it; the following commit switches the arithmetic-path
+convention) for anyone who wants to reproduce the failure.
 
 One float→int16 scaling constant per run, computed to leave
 6 dB headroom above max(|x|, |d|), applied
@@ -147,8 +173,36 @@ rather than a floor-dependent large number. STOI and wideband PESQ are
 computed over the near-active span; log-spectral distance per frame.
 
 **Misalignment**: 10·log10(‖w − h‖²/‖h‖²) with `h_echo`
-truncated/zero-padded to the filter length. Computed for `nlms_f64` (Speex
-does not expose coefficients).
+truncated/zero-padded to the filter length. Computed for `nlms_f64` and
+`nlms_q15` (Speex does not expose coefficients). For the fixed-point
+path, w/2¹⁵ is compared to `h_echo` directly: x and d share one scaling
+constant, so the echo path in the int16 domain is unchanged.
+
+**Fixed-point instrumentation** (`nlms_q15` only; all evaluated on the
+coefficient state *after* saturation and after the word-length mask, so
+the sweep and the counters tell one story):
+
+- *Full-stall events*: samples where the error is nonzero, the
+  reference window is nonzero, and **no** coefficient changed —
+  adaptation halted for that sample. Count and positions recorded.
+- *Per-tap stalls*: active taps whose coefficient did not change during
+  an attempted update — the tap-granular version of the same
+  phenomenon, recorded as a per-sample count.
+- *Saturation events*: per narrowing site (filter output `y`, error,
+  gain, coefficient update), counts and sample positions.
+- *Coefficient divergence from float*: an in-loop float64 shadow filter
+  runs the identical recursion on the identical quantised input
+  (x/2¹⁵, d/2¹⁵), and 10·log10(‖w_q15/2¹⁵ − w_float‖²/‖w_float‖²) is
+  recorded **per sample**, so bursts of saturation and the growth of
+  coefficient error can be aligned in time. The shadow is never masked;
+  at reduced word lengths the curve measures total degradation against
+  the ideal float filter. Because the shadow sees quantised input, the
+  curve isolates arithmetic degradation from input quantisation.
+
+Scalar summaries of all of these land as columns in `runs.csv`
+(`n_stall_events`, `n_tap_stalls`, `n_sat_*`, `sat_first_time_s`,
+`coeff_div_steady_db` = median over the final
+30% of the divergence curve).
 
 **Divergence**: an output is flagged diverged at the first sample that is
 non-finite or exceeds 10× the peak of |d| (+20 dB); the onset time is
@@ -158,10 +212,13 @@ recorded as a data point. Divergence is detected, never prevented.
 
 Stage A crosses RT60 × speaker–mic distance (far single-talk, no noise);
 Stage B varies one factor at a time around the baseline (RT60 0.4 s,
-1.0 m): talk state, background noise, tail length (both systems), and NLMS
-step size (with Speex run once at baseline as a labelled reference — it
-has no step-size parameter). 201 rows; the sum of per-row processing
-times is 1.8 min.
+1.0 m): talk state, background noise, tail length (all adaptive
+systems), NLMS step size (`nlms_f64` only, with Speex run once at
+baseline as a labelled reference — it has no step-size parameter), and
+effective coefficient word length (`nlms_q15` only, via low-bit masking;
+the unmasked 15-bit level is run under its own label so the sweep is
+constructed identically at every level). 279 rows; the sum of
+per-row processing times is 18.0 min.
 
 ## 2. Results
 
@@ -177,6 +234,15 @@ Steady-state ERLE (dB), mean over 3 seeds:
 | 0.4 (ach. 0.40–0.43) | 29.7 | 26.5 | 25.8 |
 | 0.6 (ach. 0.62–0.65) | 22.8 | 19.4 | 18.3 |
 | 0.8 (ach. 0.81–0.84) | 17.9 | 14.7 | 13.2 |
+
+**nlms_q15**
+
+| RT60 target (s) | 0.3 m | 1 m | 2.5 m |
+|---|---|---|---|
+| 0.2 (ach. 0.20–0.21) | 15.5 | 23.2 | 16.8 |
+| 0.4 (ach. 0.40–0.43) | 16.0 | 19.8 | 19.1 |
+| 0.6 (ach. 0.62–0.65) | 15.7 | 17.7 | 16.7 |
+| 0.8 (ach. 0.81–0.84) | 15.0 | 15.4 | 14.5 |
 
 **speex**
 
@@ -197,6 +263,15 @@ Convergence time (s) — read §1.4's caveat before comparing across systems:
 | 0.4 (ach. 0.40–0.43) | 3.69 | 2.01 | 1.33 |
 | 0.6 (ach. 0.62–0.65) | 0.49 | 0.45 | 0.44 |
 | 0.8 (ach. 0.81–0.84) | 0.42 | 0.00 | 0.14 |
+
+**nlms_q15**
+
+| RT60 target (s) | 0.3 m | 1 m | 2.5 m |
+|---|---|---|---|
+| 0.2 (ach. 0.20–0.21) | 0.13 | 2.30 | 0.50 |
+| 0.4 (ach. 0.40–0.43) | 0.14 | 1.65 | 0.42 |
+| 0.6 (ach. 0.62–0.65) | 0.13 | 0.12 | 0.50 |
+| 0.8 (ach. 0.81–0.84) | 0.13 | 0.03 | 0.23 |
 
 **speex**
 
@@ -225,29 +300,29 @@ monotonic (closer loudspeaker → higher ERLE) with one off-pattern cell
 Steady-state ERLE (dB) over far-only regions ("–" = undefined, no
 far-end activity):
 
-| talk state | nlms_f64 | none | speex |
-|---|---|---|---|
-| far_single | 26.5 | -0.0 | 26.8 |
-| double | -12.1 | -0.0 | 24.4 |
-| near_single | – | – | – |
+| talk state | nlms_f64 | nlms_q15 | none | speex |
+|---|---|---|---|---|
+| far_single | 26.5 | 19.8 | -0.0 | 26.8 |
+| double | -12.1 | 10.8 | -0.0 | 24.4 |
+| near_single | – | – | – | – |
 
 Near-end distortion over near-active regions:
 
 **double-talk** (echo + near-end simultaneously):
 
-| metric | nlms_f64 | none | speex |
-|---|---|---|---|
-| pesq_wb | 1.07 | 1.19 | 2.76 |
-| segsnr_db | -19.55 | -0.93 | 5.55 |
-| stoi | 0.38 | 0.68 | 0.94 |
+| metric | nlms_f64 | nlms_q15 | none | speex |
+|---|---|---|---|---|
+| pesq_wb | 1.07 | 1.14 | 1.19 | 2.76 |
+| segsnr_db | -19.55 | -4.03 | -0.93 | 5.55 |
+| stoi | 0.38 | 0.66 | 0.68 | 0.94 |
 
 **near-single-talk** (no far-end at all — pure passthrough):
 
-| metric | nlms_f64 | none | speex |
-|---|---|---|---|
-| pesq_wb | 4.64 | 4.64 | 4.54 |
-| segsnr_db | inf | 68.08 | 8.72 |
-| stoi | 1.00 | 1.00 | 1.00 |
+| metric | nlms_f64 | nlms_q15 | none | speex |
+|---|---|---|---|---|
+| pesq_wb | 4.64 | 4.64 | 4.64 | 4.54 |
+| segsnr_db | inf | 68.08 | 68.08 | 8.72 |
+| stoi | 1.00 | 1.00 | 1.00 | 1.00 |
 
 The `none` row's near-single segmental SNR (68.1 dB) is the
 measured int16 quantisation floor of the shared I/O path — the ceiling
@@ -266,7 +341,14 @@ while *improving* the near-end over the unprocessed mixture: segSNR
 1.19. The unprotected NLMS instead
 destroys both: -12.1 dB mean ERLE and
 -19.6 dB segSNR (per-seed detail in
-§2.4).
+§2.4). The fixed-point NLMS is equally unprotected but cannot diverge —
+its arithmetic saturates — and instead settles into bounded degradation:
+10.8 dB mean ERLE and
+-4.0 dB segSNR during
+double-talk, with
+12,439 saturation events per run on average
+(vs 15,370 averaged over all clean Stage A runs).
+§2.8 examines this float-vs-fixed contrast cell by cell.
 
 ![Stage B talk state](figures/stage_b_talk.png)
 
@@ -275,15 +357,21 @@ destroys both: -12.1 dB mean ERLE and
 Steady-state ERLE (dB), mean over seeds (diverged runs included — they are
 the phenomenon, not an artifact):
 
-| noise level | nlms_f64 | none | speex |
-|---|---|---|---|
-| no_noise | 26.5 | -0.0 | 26.8 |
-| snr20 | -1.8 | -0.0 | 15.0 |
-| snr10 | -10.7 | -0.0 | 7.4 |
+| noise level | nlms_f64 | nlms_q15 | none | speex |
+|---|---|---|---|---|
+| no_noise | 26.5 | 19.8 | -0.0 | 26.8 |
+| snr20 | -1.8 | 9.6 | -0.0 | 15.0 |
+| snr10 | -10.7 | 5.3 | -0.0 | 7.4 |
 
-Speex degrades gracefully as SNR falls. NLMS collapses: at 20 dB SNR
-1 of 3 seeds diverged; at 10 dB SNR 3 of
-3 did. No near-end speech is present in any of these runs.
+Speex degrades gracefully as SNR falls. Float NLMS collapses: at 20 dB
+SNR 1 of 3 seeds diverged; at 10 dB SNR 3 of
+3 did. No near-end speech is present in any of these runs. The
+Q15 NLMS on the identical microphone signals reports
+5.3 dB mean ERLE at 10 dB SNR —
+degraded relative to its clean-condition
+19.8 dB, but bounded, with
+22,183 saturation events per run on average
+(§2.8).
 
 ![Stage B noise](figures/stage_b_noise.png)
 
@@ -310,21 +398,21 @@ of signal onset, before any adaptation has consolidated.
 
 Steady-state ERLE (dB):
 
-| filter length | nlms_f64 | speex |
-|---|---|---|
-| 50ms | 11.9 | 8.7 |
-| 100ms | 18.7 | 16.7 |
-| 200ms | 26.5 | 26.8 |
-| 400ms | 23.1 | 26.0 |
+| filter length | nlms_f64 | nlms_q15 | speex |
+|---|---|---|---|
+| 50ms | 11.9 | 12.1 | 8.7 |
+| 100ms | 18.7 | 18.2 | 16.7 |
+| 200ms | 26.5 | 19.8 | 26.8 |
+| 400ms | 23.1 | 14.6 | 26.0 |
 
 Convergence time (s):
 
-| filter length | nlms_f64 | speex |
-|---|---|---|
-| 50ms | 0.0 | 1.1 |
-| 100ms | 0.2 | 3.0 |
-| 200ms | 2.0 | 6.2 |
-| 400ms | 1.2 | 7.1 |
+| filter length | nlms_f64 | nlms_q15 | speex |
+|---|---|---|---|
+| 50ms | 0.0 | 0.0 | 1.1 |
+| 100ms | 0.2 | 0.1 | 3.0 |
+| 200ms | 2.0 | 1.6 | 6.2 |
+| 400ms | 1.2 | 0.0 | 7.1 |
 
 Both systems lose heavily from undermodelling (50 ms covers little of a
 0.4 s decay). NLMS peaks at 200 ms and *loses* ground at 400 ms —
@@ -350,6 +438,138 @@ Mean over seeds; Speex at its baseline configuration shown for reference
 | speex @ baseline | 26.82 | 6.19 |
 
 ![Stage B step size](figures/stage_b_mu.png)
+
+### 2.7 Word-length sweep (headline)
+
+Effective coefficient word length via post-update low-bit masking of the
+Q15 coefficients (floor semantics, §1.3); 15 bits is the unmasked
+filter. Mean over 3 seeds; event counts are per 15 s run:
+
+| word length | steady ERLE (dB) | convergence (s) | misalignment (dB) | div. from float (dB) | full stalls | sat: gain | sat: coeff |
+|---|---|---|---|---|---|---|---|
+| 15 bits | 19.83 | 1.65 | -13.23 | -18.82 | 72,588 | 1,847 | 0 |
+| 11 bits | -17.60 | 0.04 | 31.43 | 32.24 | 4,641 | 24,353 | 232,659 |
+| 9 bits | -19.32 | 0.03 | 31.61 | 32.41 | 20,039 | 27,433 | 236,854 |
+| 7 bits | -22.44 | 0.04 | 31.77 | 32.46 | 107,981 | 34,869 | 238,652 |
+
+![Word-length sweep](figures/word_length_sweep.png)
+
+This is not the gentle precision-vs-performance slope the sweep was
+designed to trace. Four observations:
+
+1. **Unmasked Q15 works.** At 15 bits the filter reaches
+   19.8 dB mean ERLE (a few dB under float,
+   §2.8), stalls heavily at its own noise floor
+   (72,588 full-stall samples per 15 s run —
+   the classic sub-LSB truncation phenomenon), and saturates only at
+   the gain site.
+2. **Every masked level is worse than no filter at all** — mean
+   steady-state ERLE -17.6 /
+   -19.3 / -22.4 dB at
+   11 / 9 / 7 bits, all below the 0 dB passthrough line, consistent
+   across every seed. The masked filter *injects* energy. Insufficient
+   coefficient word length under this storage scheme is not "less
+   accurate" — it is actively harmful, and there is a cliff between 15
+   and 11 bits rather than a slope.
+3. **The failure mode is a ratchet to the rail, not gradual noise.**
+   The floor mask erases a positive sub-effective-LSB update but turns
+   a negative one into a full effective-LSB step downward; inside the
+   adaptation loop this is a one-way ratchet, and the filter's 3200
+   small-magnitude coefficients walk to the negative rail. The rail
+   signature is unambiguous in the table: coefficient-site saturations
+   go from 0 per run at 15 bits
+   to 232,659–238,652 at the masked levels, and misalignment
+   sits at
+   +31 dB (the railed coefficient vector's
+   energy, orders of magnitude above ‖h‖²). This is the same
+   floor-bias mechanism that rules out floor truncation in the update
+   arithmetic (§1.3), re-entering through the coefficient store: the
+   spec's `>>`/`<<` mask faithfully models truncating two's-complement
+   storage, and truncating storage is what collapses.
+4. **The stall counters do not carry the degradation signal.**
+   Full-stall counts are non-monotone across the sweep
+   (4,641 / 20,039 /
+   107,981 at 11 / 9 / 7 bits vs
+   72,588 at 15) — once the coefficients rail,
+   the dynamics are dominated by rail-and-saturation interplay rather
+   than sub-LSB truncation. Per-tap stalls are likewise
+   non-discriminative (~6.1e+08 per run at every
+   level, dominated by small-|x| taps). The naive expectation that a
+   coarser LSB simply means more stalling is wrong at this scale; the
+   degradation lives in ERLE and misalignment. (On a small stationary
+   test configuration — 32 large taps, white noise — the same mask
+   instead produces a bounded limit cycle with *fewer* stalls and a
+   graded misalignment floor; see the unit tests. The word-length
+   story is filter-scale-dependent as well as convention-dependent.)
+
+The convergence-time column above is the §1.4 artifact in its extreme
+form: 90% of a deeply negative steady state is reached almost
+immediately, so the ~0.04 s entries for masked runs mean "collapsed
+instantly", not "converged fast".
+
+### 2.8 Fixed point vs float
+
+At the baseline scenario the Q15 filter costs a few dB against its
+float counterpart on identical tasks: steady-state ERLE
+19.8 vs
+26.5 dB, final misalignment
+-13.2 vs
+-17.1 dB (mean over seeds). Across all of Stage A the
+paired per-cell ERLE gap (float − Q15, same cell, same seed) is
+7.0 dB (min -3.8, max
+26.0). The gap concentrates at the 0.3 m distance
+(10.8 dB mean, vs 4.4 /
+5.9 dB at 1.0 / 2.5 m): with the loudspeaker
+that close the echo-path taps are large enough that the coefficient
+site saturates continuously (26,225 clipped-tap events
+per run on average; misalignment stalls near -1.8 dB) — the
+Q15 filter is *representation*-limited there, not merely
+quantisation-noise-limited. The per-sample divergence between the Q15
+coefficients and the float64 shadow filter on identical quantised input
+settles at -18.8 dB (baseline,
+mean over seeds):
+
+![Q15 vs float shadow](figures/q15_float_divergence.png)
+
+**Where the float filter diverged, the fixed-point filter did not — in
+any of the 6 matched runs.** Saturating arithmetic bounds
+every quantity the float recursion lets explode, so the same
+uncorrelated-energy hazard (§3.1) produces bounded degradation instead:
+
+| condition | f64 onset (s) | f64 post-hoc ERLE (dB) | q15 status | q15 steady ERLE (dB) | q15 saturations | q15 first sat (s) | q15 div. from float (dB) |
+|---|---|---|---|---|---|---|---|
+| talk/double, seed 0 | 6.7 | -29.0 | ok | 8.6 | 16,858 | 0.0 | -0.0 |
+| talk/double, seed 1 | 7.1 | -11.7 | ok | 9.0 | 11,291 | 0.0 | -0.1 |
+| noise/snr20, seed 0 | 6.9 | -16.0 | ok | 9.2 | 23,104 | 0.0 | -0.1 |
+| noise/snr10, seed 0 | 4.1 | -25.7 | ok | 5.0 | 28,939 | 0.0 | 0.0 |
+| noise/snr10, seed 1 | 0.4 | -9.1 | ok | 5.1 | 22,089 | 0.0 | -0.5 |
+| noise/snr10, seed 2 | 1.4 | 2.8 | ok | 5.9 | 15,521 | 0.0 | -3.0 |
+
+The "div. from float" column reads ≈0 dB in every one of these cells,
+and the per-sample curves show why: under strong uncorrelated energy
+the Q15 and float coefficient trajectories separate **immediately and
+completely** — the relative difference is already ~0 dB (100%) within
+the first fraction of a second, long before the float run's *output*
+crosses the divergence threshold. There is no gradual
+saturation-then-divergence cascade; the two arithmetic paths simply
+never correspond once the input is noise-dominated, whereas in clean
+conditions the same curve locks to
+-19 dB. (In these cells the
+float shadow inside the Q15 run is itself the diverging recursion, so
+the column measures separation from a diverged trajectory — which is
+the point: there is no meaningful float solution left to track.)
+
+Two caveats keep this honest. First, the divergence detector
+(non-finite or >10× peak |d|) **cannot fire** for `nlms_q15`: int16
+output can never exceed ~5× the peak of a signal recorded with
+6 dB headroom, so `status = ok` means
+"bounded", not "healthy" — the health measures are ERLE, misalignment,
+and the divergence-from-float column. Second, bounded is not good:
+10.8 dB mean ERLE in double-talk is
+still echo leaking through, and the coefficient state ends far from the
+float solution. Saturation acts as a crude, implicit safety net — an
+architectural side effect, not adaptation control; Speex's explicit
+protection achieves bounded *and* useful (§2.2–2.3).
 
 ## 3. Discussion
 
@@ -421,6 +641,25 @@ therefore show individual seeds, with diverged runs marked; with
 3 seeds, error bars would imply a precision this design does not
 have.
 
+### 3.6 Saturation is containment, not protection
+
+Tier 0's central finding was that uncorrelated energy in `d` blows up
+the unprotected float NLMS. Tier 1 adds the fixed-point corollary: the
+same hazard, hitting the same unprotected recursion in saturating
+arithmetic, is *contained* rather than prevented — every diverged float
+run's Q15 counterpart stayed bounded (§2.8), because saturation caps
+the gain, the error, and the coefficient magnitudes that the float
+recursion lets grow without limit. But containment buys bounded
+uselessness, not usefulness: the contained runs still leak echo and end
+far from the true path. The comparison triangle is instructive —
+`nlms_f64` (no protection, unbounded arithmetic) diverges; `nlms_q15`
+(no protection, saturating arithmetic) degrades and rides its rails;
+`speex` (explicit adaptation control) degrades gracefully and stays
+useful. Arithmetic format is a poor substitute for adaptation control,
+but it does change the failure mode from catastrophic to bounded — an
+operationally meaningful difference for deployed systems, where a
+diverged canceller screeches and a saturated one merely underperforms.
+
 ## 4. Limitations
 
 - **Simulation gap.** No loudspeaker nonlinearity, no time-varying echo
@@ -439,8 +678,21 @@ have.
   metrics correctly ignore. This mismatch is part of the motivation for
   the planned masking-based audibility analysis (Tier 1).
 - **Float-vs-fixed asymmetry.** `nlms_f64` never passes the int16 path;
-  `speex` and `none` do. The quantisation floor measured on `none`
-  (§2.2) bounds the effect, but the comparison is not symmetric.
+  `speex`, `nlms_q15`, and `none` do. The quantisation floor measured
+  on `none` (§2.2) bounds the effect, but the comparison is not
+  symmetric.
+- **Fixed-point results are rounding-convention-specific.** All
+  `nlms_q15` stalling, saturation, and word-length results describe a
+  magnitude-truncating arithmetic path with a floor-semantics
+  coefficient mask (§1.3). A floor-truncating update path fails
+  outright (measured — §1.3); a round-to-nearest implementation would
+  stall less and jitter differently. The word-length sweep's shape,
+  especially the worse-than-passthrough 7-bit result and the inverted
+  stall trend, should not be quoted without this qualification.
+- **The divergence detector is blind for `nlms_q15`.** Saturating int16
+  output cannot exceed the 10×-peak threshold, so `status = ok` on a
+  fixed-point row certifies boundedness only (§2.8); ERLE,
+  misalignment, and divergence-from-float carry the health information.
 - **Convergence metric construction.** Relative-to-own-steady-state
   convergence times are not comparable across systems with different
   steady states (§1.4, §3.4).
