@@ -79,6 +79,46 @@ segmentation:
   energy_threshold_dbov: -45.0
   hangover_ms: 200.0
 
+# Perceptual audibility of residual echo (spec §8.7). Simplified
+# simultaneous-masking model, implemented in src/psychoacoustic.py — not an
+# existing PEAQ/psychoacoustics package: the analysis asks a *relative*
+# question (which system's residual is more audible under the same masker),
+# and a fixed-offset simplified model biases all systems identically, so
+# comparative conclusions survive the simplification. Every model constant
+# lives here, not in code.
+audibility:
+  stft_nperseg: 512                # 32 ms Hann analysis window
+  stft_hop: 320                    # = one 20 ms segmentation frame -> STFT
+                                   #   frames map 1:1 onto ERLE-valid frames
+  stft_window: hann
+  # Hz->Bark: Zwicker–Terhardt arctan approximation
+  #   z(f) = a*arctan(b*f) + c*arctan((f/d)^2)
+  bark_a: 13.0
+  bark_b: 0.00076
+  bark_c: 3.5
+  bark_d_hz: 7500.0
+  # Two-slope spreading function, attenuation per Bark of separation from
+  # the masker band (masking spreads more readily toward higher bands, so
+  # the upward slope is the shallower one). Applied as a linear-domain
+  # excitation sum over bands.
+  spreading_lower_db_per_bark: 27.0   # toward lower bands
+  spreading_upper_db_per_bark: 10.0   # toward higher bands
+  masking_offset_db: 14.0          # threshold = spread masker power - offset
+  # Absolute floor for the threshold, in dB re full-scale^2 band power.
+  # This is the absolute-threshold-of-hearing proxy: in no-noise far-single
+  # cells the masker is silence, and without a floor those cells would
+  # report ~100% audibility by construction. A constant, not a
+  # physiological curve — fixed across systems, so relative comparisons
+  # are unaffected.
+  threshold_floor_db: -65.0
+  # Between coefficient snapshots (record_every samples apart) the
+  # reconstruction holds the block-START state — the convention that is
+  # causally exact when record_every=1, which is how it is unit-tested.
+  # Linear interpolation between snapshots is computed as a secondary
+  # column for the float path only (interpolating int16 states is not Q15
+  # arithmetic).
+  reconstruction: hold
+
 metrics:
   erle_ema_alpha: 0.9              # smoothed = a*prev + (1-a)*new, valid frames only
   steady_state_last_fraction: 0.3  # steady state = median of final 30% of valid frames
