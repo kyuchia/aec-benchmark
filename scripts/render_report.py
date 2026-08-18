@@ -46,6 +46,7 @@ def md_table(df: pd.DataFrame, index_label: str, fmt: str = "{:.1f}") -> str:
 def main() -> None:
     runs = pd.read_csv(RAW / "runs.csv")
     cal = pd.read_csv(RAW / "calibration.csv")
+    cost = pd.read_csv(RAW / "cost.csv")
     with open(REPO_ROOT / "config" / "scenarios.yaml") as f:
         cfg = yaml.safe_load(f)
 
@@ -284,6 +285,27 @@ def main() -> None:
     q15_traj_dfrac = (q15_fs.audibility_fraction_traj
                       - q15_fs.audibility_fraction)
 
+    # ------------------------------------------------------ Tier 1: cost
+    cost_tab_rows = []
+    for system in sys_order:
+        sub = cost[cost.system == system]
+        cost_tab_rows.append({
+            "system": system,
+            "RTF (mean)": sub.rtf.mean(),
+            "RTF (range)": f"{sub.rtf.min():.4f}–{sub.rtf.max():.4f}",
+            "MAC/sample (derived)": (f"{sub.mac_per_sample.iloc[0]:,.0f}"
+                                     if sub.mac_per_sample.iloc[0] > 0
+                                     else "–"),
+            "state (bytes)": (f"{sub.state_bytes.iloc[0]:,d}"
+                              if sub.state_bytes.iloc[0] > 0 else "–"),
+        })
+    cost_tab = pd.DataFrame(cost_tab_rows).set_index("system")
+    mac_nlms = cost[cost.system == "nlms_f64"].mac_per_sample.iloc[0]
+    mac_mdf = cost[cost.system == "speex"].mac_per_sample.iloc[0]
+    rtf_f64 = cost[cost.system == "nlms_f64"].rtf.mean()
+    rtf_q15 = cost[cost.system == "nlms_q15"].rtf.mean()
+    rtf_speex = cost[cost.system == "speex"].rtf.mean()
+
     # Two-run approximation error bar: cells where d != d_echo only
     # (noise and double-talk; in no-noise far-single the two runs are
     # bit-identical by construction and the diff is exactly 0).
@@ -327,7 +349,7 @@ def main() -> None:
     tl = cfg["timelines"]["double"]
 
     # ------------------------------------------------------------------ report
-    report = f"""# AEC benchmark — report (Tier 0 + Tier 1 fixed point)
+    report = f"""# AEC benchmark — report (Tier 0 + Tier 1)
 
 Comparison of a float64 NLMS adaptive filter (`nlms_f64`), a Q15
 fixed-point NLMS (`nlms_q15`), and the SpeexDSP MDF echo canceller
@@ -336,9 +358,9 @@ room-acoustic scenarios. {n_total} runs ({n_seeds} utterance-pair seeds
 per condition); {n_ok} completed normally, {n_total - n_ok} diverged
 (all {"`" + "`, `".join(sorted(div.system.unique())) + "`" if len(div)
  else "none"}; §2.4 — the fixed-point system cannot trip the divergence
-detector at all, see §2.8). Tier 1 coverage so far: fixed-point
-arithmetic and the word-length sweep (M7) and perceptual audibility of
-residual echo (M8); computational cost (M9) follows. All numbers in this
+detector at all, see §2.8). Tier 1 is complete: fixed-point arithmetic
+and the word-length sweep (§2.7–2.8), perceptual audibility of residual
+echo (§2.9), and computational cost (§2.10). All numbers in this
 report are
 rendered from `results/raw/*.csv` by `scripts/render_report.py`; run
 provenance (git SHA per row): {", ".join(git_shas)}.
@@ -966,6 +988,38 @@ run's steady-state ERLE differs from the primary run's by
 {two_diff.min():+.1f} to {two_diff.max():+.1f} dB) — the scale of
 trust to attach to speex audibility numbers in those cells.
 
+### 2.10 Computational cost
+
+Real-time factor is measured around the canceller call alone (baseline
+cell, {n_seeds} seeds, `scripts/measure_cost.py` →
+`results/raw/cost.csv`); operation counts and state sizes are derived
+analytically (`src/metrics.py`, §8.6 formulas in the docstrings),
+never measured:
+
+{md_table(cost_tab, "system", "{:.4f}")}
+
+**The measured RTF is an implementation artifact, not an algorithm
+property — the derived MAC count is the hardware-relevant number.**
+The table proves it by self-contradiction: `speex` executes
+{mac_nlms / mac_mdf:.0f}× *fewer* operations per sample than the
+time-domain NLMS yet runs {rtf_f64 / rtf_speex:.0f}× faster — compiled
+C against a per-sample Python loop — and `nlms_q15` executes the *same*
+operation count as `nlms_f64` yet is {rtf_q15 / rtf_f64:.1f}× slower,
+because its integer arithmetic cannot use BLAS-backed vector paths.
+Ranked by the derived counts, the picture is the textbook one: at the
+same {nlms_cfg["filter_length_ms"]:g} ms tail, the MDF's partitioned
+frequency-domain structure needs {mac_mdf:,.0f} MAC/sample against the
+time-domain NLMS's {mac_nlms:,.0f} — an order of magnitude
+({mac_nlms / mac_mdf:.1f}×) fewer operations for comparable
+steady-state ERLE (§2.1), which is precisely why block-frequency-domain
+cancellers exist. Memory tells the inverse story: the MDF pays for its
+operation count with roughly {cost[cost.system == "speex"].state_bytes.iloc[0] / cost[cost.system == "nlms_f64"].state_bytes.iloc[0]:.1f}×
+the float NLMS's state (partition spectra plus the AUMDF two-filter
+structure), while the Q15 filter is the smallest at
+{cost[cost.system == "nlms_q15"].state_bytes.iloc[0]:,d} bytes. The
+`nlms_q15` RTF excludes the in-loop float shadow filter (divergence
+instrumentation, not part of the canceller).
+
 ## 3. Discussion
 
 ### 3.1 The hazard is uncorrelated energy, not double-talk specifically
@@ -1070,8 +1124,7 @@ diverged canceller screeches and a saturated one merely underperforms.
   low frequency, consistent with SpeexDSP's internal DC-notch filter on
   the microphone path: a waveform-difference metric punishes a
   perceptually irrelevant low-frequency change that the perceptual
-  metrics correctly ignore. This mismatch is part of the motivation for
-  the planned masking-based audibility analysis (Tier 1).
+  metrics correctly ignore. The masking-based audibility analysis this motivated is §2.9.
 - **Float-vs-fixed asymmetry.** `nlms_f64` never passes the int16 path;
   `speex`, `nlms_q15`, and `none` do. The quantisation floor measured
   on `none` (§2.2) bounds the effect, but the comparison is not
@@ -1112,6 +1165,11 @@ diverged canceller screeches and a saturated one merely underperforms.
   within the {q15_cfg["record_every"]}-sample snapshot interval, so the
   exact component identity is the primary isolation path and the
   trajectory reconstruction serves as QC instrumentation.
+- **RTF is measured under CPython on one machine** (§2.10) and ranks
+  implementations, not algorithms; the derived MAC counts assume the
+  stated cost model (radix-2-class real FFTs at 5N·log2(2N) real MACs,
+  complex MAC = 4 real MACs, O(1) terms dropped) and the speex state
+  size is derived from the AUMDF structure rather than measured.
 - **Convergence metric construction.** Relative-to-own-steady-state
   convergence times are not comparable across systems with different
   steady states (§1.4, §3.4).
@@ -1133,6 +1191,7 @@ pip install -r requirements.txt
 python scripts/fetch_data.py          # LibriSpeech test-clean (~346 MB, md5-checked)
 python -m pytest tests/               # unit + integration tests
 python src/run_experiment.py --batch  # full matrix -> results/raw/runs.csv (+ calibration.csv)
+python scripts/measure_cost.py        # canceller-only RTF + derived cost -> results/raw/cost.csv
 python scripts/make_figures.py        # all figures  -> results/figures/
 python scripts/render_report.py       # this report  -> results/report.md
 ```

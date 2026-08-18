@@ -154,3 +154,25 @@ def test_misalignment_curve_matches_scalar():
     curve = metrics.misalignment_curve_db(traj, h)
     expected = [metrics.misalignment_db(w, h) for w in traj]
     np.testing.assert_allclose(curve, expected)
+
+
+# ---------------------------------------------------------------------------
+# Computational cost derivations (§8.6)
+# ---------------------------------------------------------------------------
+
+def test_mac_counts_at_report_configuration():
+    # NLMS: 2L per sample. MDF at N=160, L=3200 (K=20 partitions):
+    # 25*log2(320) + 8*20*161/160 = 208.05 + 161 = 369.05 MAC/sample.
+    assert metrics.nlms_mac_per_sample(3200) == 6400.0
+    assert abs(metrics.mdf_mac_per_sample(160, 3200) - 369.05) < 0.01
+    # The point of the table: same tail, order-of-magnitude gap.
+    ratio = metrics.nlms_mac_per_sample(3200) / metrics.mdf_mac_per_sample(
+        160, 3200)
+    assert 15 < ratio < 20
+
+
+def test_state_bytes_formulas():
+    assert metrics.nlms_f64_state_bytes(3200) == 16 * 3200
+    assert metrics.nlms_q15_state_bytes(3200) == 4 * 3200 + 8
+    # (3K+1)*2N*4 with K=20, N=160.
+    assert metrics.mdf_state_bytes(160, 3200) == 61 * 320 * 4

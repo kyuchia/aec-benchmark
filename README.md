@@ -22,7 +22,9 @@ distortion (segmental SNR, STOI, PESQ, log-spectral distance), coefficient
 misalignment against the true echo path, fixed-point stall/saturation
 event counts, and perceptual audibility of the isolated residual echo
 (simplified Bark-domain masking model; exact residual isolation for the
-linear systems, the spec's two-run approximation for SpeexDSP).
+linear systems, the spec's two-run approximation for SpeexDSP), plus
+computational cost (measured canceller-only real-time factor, analytically
+derived MAC counts, and state sizes).
 
 **Findings and figures: [results/report.md](results/report.md).** Every
 number in the report is rendered from `results/raw/*.csv` by script; nothing
@@ -56,6 +58,7 @@ if yours is elsewhere. No compiled Python extension is required.
 python scripts/fetch_data.py          # LibriSpeech test-clean (~346 MB, md5-verified)
 python -m pytest tests/               # unit + integration tests
 python src/run_experiment.py --batch  # full matrix -> results/raw/runs.csv + calibration.csv
+python scripts/measure_cost.py        # canceller-only RTF + derived cost -> results/raw/cost.csv
 python scripts/make_figures.py        # all figures -> results/figures/
 python scripts/render_report.py       # report      -> results/report.md
 ```

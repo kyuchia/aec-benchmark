@@ -202,3 +202,60 @@ def misalignment_db(w: np.ndarray, h: np.ndarray) -> float:
 def misalignment_curve_db(w_traj: np.ndarray, h: np.ndarray) -> np.ndarray:
     """Misalignment per recorded coefficient snapshot."""
     return np.array([misalignment_db(w, h) for w in w_traj])
+
+
+# ---------------------------------------------------------------------------
+# Computational cost (§8.6) — derived analytically, never measured
+# ---------------------------------------------------------------------------
+
+def nlms_mac_per_sample(L: int) -> float:
+    """Sample-wise NLMS: L MACs for the filter output plus L for the
+    coefficient update per sample; the sliding-window power and the
+    normalised gain are O(1) per sample and excluded. Identical for the
+    float and Q15 paths (a MAC is a MAC; only its width differs)."""
+    return float(2 * L)
+
+
+def mdf_mac_per_sample(frame_size: int, L: int) -> float:
+    """Partitioned block-frequency-domain (MDF/AUMDF) canceller,
+    K = ceil(L/N) partitions, FFT length M = 2N, per N-sample frame:
+
+      - 5 real FFTs of length 2N (input block, filter output, error,
+        and the amortised AUMDF gradient-constraint pair), each costed
+        at 5*N*log2(2N) real MACs — half the classic 5*M*log2(M)
+        real-operation count of a complex radix-2-class FFT at M = 2N;
+      - filtering + update: one complex multiply-accumulate per bin per
+        partition for each, 2 * K * (N+1) complex MACs = 8 * K * (N+1)
+        real MACs.
+
+    Total per frame: 25*N*log2(2N) + 8*K*(N+1); divided by N for the
+    per-sample figure."""
+    n = int(frame_size)
+    k = -(-int(L) // n)  # ceil
+    per_frame = 25.0 * n * np.log2(2 * n) + 8.0 * k * (n + 1)
+    return per_frame / n
+
+
+def nlms_f64_state_bytes(L: int) -> int:
+    """float64 coefficients (8L) + L-sample float64 input window (8L);
+    the sliding power sum and scalars are O(1)."""
+    return 16 * L
+
+
+def nlms_q15_state_bytes(L: int) -> int:
+    """int16 coefficients (2L) + int16 input window (2L) + the int64
+    exact window-power accumulator. This is the algorithmic state; the
+    reference implementation additionally widens the coefficient array
+    to int64 in-loop for analysis convenience, which is not counted."""
+    return 4 * L + 8
+
+
+def mdf_state_bytes(frame_size: int, L: int) -> int:
+    """SpeexDSP AUMDF, float build: dominant arrays are the adaptive
+    weights (K*M floats), the foreground filter of the two-filter
+    structure (K*M), and the input-spectrum history ((K+1)*M), M = 2N —
+    (3K+1)*M*4 bytes, plus O(M) working buffers not counted. Derived
+    from the AUMDF structure, not measured."""
+    n = int(frame_size)
+    k = -(-int(L) // n)
+    return (3 * k + 1) * 2 * n * 4
