@@ -38,6 +38,7 @@ import soundfile as sf
 import yaml
 
 import metrics
+import psychoacoustic
 from aec_nlms import nlms
 from aec_nlms_fixed import nlms_q15
 from aec_speex import run_speex_aec
@@ -73,6 +74,10 @@ CSV_FIELDS = [
     "convergence_time_s", "converged",
     "segsnr_db", "stoi", "pesq_wb", "lsd_db",
     "misalignment_final_db",
+    "audibility_fraction", "audibility_excess_db", "audibility_n_units",
+    "audibility_fraction_traj", "audibility_fraction_interp",
+    "recon_err_db", "recon_err_interp_db",
+    "speex_tworun_erle_diff_db",
     "mu_q15", "delta_q30", "coeff_bits",
     "n_stall_events", "stall_first_time_s", "n_tap_stalls",
     "n_sat_total", "n_sat_y", "n_sat_err", "n_sat_gain", "n_sat_coeff",
@@ -199,6 +204,7 @@ def run_nlms_q15(x: np.ndarray, d: np.ndarray, scale: float,
         extras[f"sat_positions_{site}"] = pos
     if out["w_traj"] is not None:
         extras["w_traj"] = out["w_traj"] / 32768.0
+        extras["w_traj_q15"] = out["w_traj"]
 
     sc = out["sat_counts"]
     all_sat = np.concatenate(list(out["sat_positions"].values()))
@@ -243,6 +249,126 @@ def merged_sys_params(cfg: dict, system: str, overrides: dict) -> dict:
     params = dict(cfg["systems"][system])
     params.update(overrides)
     return params
+
+
+# ---------------------------------------------------------------------------
+# Residual-echo isolation + perceptual audibility (spec §8.7)
+# ---------------------------------------------------------------------------
+
+def _erle_valid_samples(seg: Segmentation, n: int) -> np.ndarray:
+    """Per-sample mask of ERLE-valid (far-single) frames."""
+    mask = np.repeat(seg.erle_valid, seg.frame_len)
+    if len(mask) < n:
+        mask = np.concatenate([mask, np.zeros(n - len(mask), bool)])
+    return mask[:n]
+
+
+def residual_and_audibility(system: str, sigs: SignalSet, seg: Segmentation,
+                            scale: float, sys_params: dict, extras: dict,
+                            e: np.ndarray, sample_rate: int,
+                            aud_cfg: dict, met_cfg: dict) -> tuple[dict,
+                                                                   dict]:
+    """Isolate each system's residual echo and score its audibility.
+
+    Primary residual, linear-subtraction systems (none / nlms_f64 /
+    nlms_q15): the exact component identity r = e - s - v. For a
+    canceller with output e = d - y and d = d_echo + s + v this is
+    algebraically identical to the spec's decomposition d_echo - y(w(n))
+    evaluated with the *exact per-sample* coefficients — i.e. the
+    trajectory method at record_every = 1, which is the convention the
+    reconstruction is unit-tested exact at. (Exact for nlms_f64; for
+    nlms_q15 exact except at error-narrowing saturation samples, whose
+    count the instrumentation records.)
+
+    The recorded-trajectory reconstruction (hold = block-start state;
+    f64 additionally under linear interpolation; Q15 in Q15 arithmetic
+    from the int16 trajectory) is still computed: its error against the
+    exact y = d - e output is the QC column, and audibility fractions
+    from the trajectory residuals are recorded alongside the primary
+    ones so the decimation's materiality is measured, not assumed.
+
+    speex: the spec's two-run approximation (same configuration on an
+    echo-only microphone signal), with the ERLE difference between the
+    two runs recorded as the approximation's error bar. The component
+    identity is deliberately NOT used for speex: its internal DC notch
+    on the microphone path means e != d - y exactly, so an identity
+    residual would carry notch artifacts of s + v.
+
+    The masker is near-end speech plus noise (s + v); audibility is
+    computed over ERLE-valid frames only, matching the ERLE metric.
+    """
+    entry: dict = {}
+    arrays: dict = {}
+    valid_samp = _erle_valid_samples(seg, len(sigs.d))
+    record_every = sys_params.get("record_every")
+
+    def traj_fraction(residual_traj: np.ndarray) -> float:
+        return psychoacoustic.audibility(
+            residual_traj, sigs.s + sigs.v, seg.erle_valid,
+            seg.frame_len, sample_rate, aud_cfg)["fraction"]
+
+    if system == "none":
+        residual = e - sigs.s - sigs.v
+    elif system == "nlms_f64":
+        residual = e - sigs.s - sigs.v
+        y_act = sigs.d - e
+        y_hold = psychoacoustic.reconstruct_output_f64(
+            sigs.x, extras["w_traj"], int(record_every))
+        y_interp = psychoacoustic.reconstruct_output_f64(
+            sigs.x, extras["w_traj"], int(record_every), interpolate=True)
+        entry["recon_err_db"] = psychoacoustic.reconstruction_error_db(
+            y_hold, y_act, valid_samp)
+        entry["recon_err_interp_db"] = \
+            psychoacoustic.reconstruction_error_db(y_interp, y_act,
+                                                   valid_samp)
+        entry["audibility_fraction_traj"] = traj_fraction(
+            sigs.d_echo - y_hold)
+        entry["audibility_fraction_interp"] = traj_fraction(
+            sigs.d_echo - y_interp)
+    elif system == "nlms_q15":
+        residual = e - sigs.s - sigs.v
+        x16 = float_to_int16(sigs.x, scale, name="x (nlms_q15 recon)")
+        d16 = float_to_int16(sigs.d, scale, name="d (nlms_q15 recon)")
+        e16 = np.round(e * scale).astype(np.int64)
+        y_act = d16.astype(np.int64) - e16
+        ok = valid_samp.copy()
+        ok[extras["sat_positions_err"]] = False  # d-e != y where err clipped
+        y_rec = psychoacoustic.reconstruct_output_q15(
+            x16, extras["w_traj_q15"], int(record_every))
+        entry["recon_err_db"] = psychoacoustic.reconstruction_error_db(
+            y_rec, y_act, ok)
+        entry["audibility_fraction_traj"] = traj_fraction(
+            sigs.d_echo - y_rec / scale)
+    elif system == "speex":
+        d_echo16 = float_to_int16(sigs.d_echo, scale,
+                                  name="d_echo (speex two-run)")
+        x16 = float_to_int16(sigs.x, scale, name="x (speex two-run)")
+        e2 = run_speex_aec(x16, d_echo16, int(sys_params["frame_size"]),
+                           int(round(sys_params["filter_length_ms"]
+                                     * 1e-3 * sample_rate)), sample_rate)
+        residual = int16_to_float(e2, scale)
+        # Approximation error bar: steady-state ERLE of the echo-only
+        # run minus the primary run's (computed by the caller and merged
+        # there, since the primary value lives in the metrics entry).
+        erle2 = metrics.erle_curve(
+            sigs.d_echo, residual, seg.erle_valid, seg.frame_len,
+            ema_alpha=float(met_cfg["erle_ema_alpha"]),
+            steady_state_last_fraction=float(
+                met_cfg["steady_state_last_fraction"]),
+            sanity_max_db=float(met_cfg["erle_sanity_max_db"]),
+        )
+        entry["_tworun_erle_steady_db"] = erle2["steady_state_db"]
+    else:
+        raise ValueError(f"unknown system {system!r}")
+
+    aud = psychoacoustic.audibility(residual, sigs.s + sigs.v,
+                                    seg.erle_valid, seg.frame_len,
+                                    sample_rate, aud_cfg)
+    entry["audibility_fraction"] = aud["fraction"]
+    entry["audibility_excess_db"] = aud["excess_db"]
+    entry["audibility_n_units"] = aud["n_units"]
+    arrays["audibility_frame_fraction"] = aud["frame_fraction"]
+    return entry, arrays
 
 
 # ---------------------------------------------------------------------------
@@ -444,8 +570,10 @@ def process_row(ctx: BatchContext, spec: dict, sha: str) -> dict:
         sigs, rirs, seg, scale, cell_dir = ctx.signals(scenario, spec["seed"])
         sys_params = merged_sys_params(cfg, spec["system"],
                                        spec.get("overrides", {}))
-        if not spec.get("record_traj", False):
-            sys_params["record_every"] = None
+        # The coefficient trajectory is recorded in-memory for every
+        # nlms run — audibility's residual isolation needs it — but
+        # persisted to the cell npz only for record_traj (baseline)
+        # rows, as before.
         row.update({
             "rt60_achieved_echo_s": rirs.rt60_achieved_echo_s,
             "rt60_achieved_near_s": rirs.rt60_achieved_near_s,
@@ -469,7 +597,10 @@ def process_row(ctx: BatchContext, spec: dict, sha: str) -> dict:
         row.update({k: v for k, v in sys_meta.items() if k in CSV_FIELDS})
 
         label = spec["output_label"]
-        np.savez_compressed(cell_dir / f"e_{label}.npz", e=e, **extras)
+        persist = extras if spec.get("record_traj", False) else {
+            k: v for k, v in extras.items()
+            if k not in ("w_traj", "w_traj_q15")}
+        np.savez_compressed(cell_dir / f"e_{label}.npz", e=e, **persist)
 
         div_t = detect_divergence(e, sigs.d, sample_rate)
         if div_t is not None:
@@ -479,6 +610,18 @@ def process_row(ctx: BatchContext, spec: dict, sha: str) -> dict:
         entry, arrays = system_metrics(
             cfg, sigs, seg, e, extras, rirs, sample_rate,
             sys_params.get("record_every"))
+        aud_entry, aud_arrays = residual_and_audibility(
+            spec["system"], sigs, seg, scale, sys_params, extras, e,
+            sample_rate, cfg["audibility"], cfg["metrics"])
+        if "_tworun_erle_steady_db" in aud_entry:
+            two = aud_entry.pop("_tworun_erle_steady_db")
+            base_erle = entry.get("erle_steady_state_db")
+            aud_entry["speex_tworun_erle_diff_db"] = (
+                two - base_erle
+                if two is not None and base_erle is not None
+                and np.isfinite(two) and np.isfinite(base_erle) else None)
+        entry.update(aud_entry)
+        arrays.update(aud_arrays)
         np.savez_compressed(cell_dir / f"metrics_{label}.npz", **arrays)
         row.update({k: v for k, v in entry.items() if k in CSV_FIELDS})
     except Exception as exc:  # noqa: BLE001 - row records the failure

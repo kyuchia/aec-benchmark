@@ -387,6 +387,36 @@ def plot_q15_float_divergence(cell_dir: Path, out_dir: Path,
     plt.close(fig)
 
 
+def plot_audibility(csv_path: Path, out_dir: Path) -> None:
+    """Residual-echo audibility across the noise axis (the cells with a
+    real masker) plus the double-talk cell: fraction of TF units above
+    the masking threshold, and mean excess over it."""
+    df = pd.read_csv(csv_path)
+    noise = df[(df["stage"] == "b") & (df["axis"] == "noise")].copy()
+    dt = df[(df["stage"] == "b") & (df["axis"] == "talk")
+            & (df["level"] == "double")].copy()
+    dt["level"] = "double_talk"
+    sub = pd.concat([noise, dt])
+    levels = ["no_noise", "snr20", "snr10", "double_talk"]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.4))
+    _strip_axis(ax1, sub, levels, "audibility_fraction")
+    ax1.set_ylabel("fraction of TF units above threshold")
+    ax1.set_ylim(-0.02, 1.05)
+    ax1.legend(fontsize=8)
+    _strip_axis(ax2, sub, levels, "audibility_excess_db")
+    ax2.set_ylabel("mean excess above threshold (dB)")
+    for ax in (ax1, ax2):
+        ax.set_xlabel("condition (baseline room)")
+    fig.suptitle("Residual-echo audibility — far-single segments "
+                 "(per-seed points, bar = mean); threshold = spread "
+                 "noise masking in snr cells, constant floor where the "
+                 "masker is silent (no_noise, double_talk)", fontsize=10)
+    fig.tight_layout()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_dir / "audibility.png", dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
 def batch_figures(csv_path: Path, out_dir: Path,
                   baseline_cell_dir: Path | None = None) -> None:
     plot_stage_a(csv_path, out_dir)
@@ -395,6 +425,7 @@ def batch_figures(csv_path: Path, out_dir: Path,
     plot_stage_b_tail(csv_path, out_dir)
     plot_stage_b_mu(csv_path, out_dir)
     plot_word_length(csv_path, out_dir)
+    plot_audibility(csv_path, out_dir)
     if baseline_cell_dir is not None and baseline_cell_dir.is_dir():
         plot_baseline_curves(csv_path, baseline_cell_dir, out_dir)
         plot_q15_float_divergence(baseline_cell_dir, out_dir)

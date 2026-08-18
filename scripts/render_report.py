@@ -228,6 +228,71 @@ def main() -> None:
     mu_q15_int = int(round(q15_cfg["mu"] * 32768))
     delta_q30_int = max(1, int(round(q15_cfg["delta"] * 2**30)))
 
+    # -------------------------------------------------- Tier 1: audibility
+    aud_cfg = cfg["audibility"]
+    sys_order = ["none", "nlms_f64", "nlms_q15", "speex"]
+
+    def aud_pivot(sub, cols):
+        p = sub.pivot_table(values=cols, index="system",
+                            aggfunc="mean").reindex(sys_order)
+        return p[cols]
+
+    base_all = runs[(runs.stage == "a")
+                    & (runs.scenario_key.str.startswith("rt0.4_d1_"))]
+    aud_base = aud_pivot(base_all, ["erle_steady_state_db",
+                                    "audibility_fraction",
+                                    "audibility_excess_db"])
+    aud_base.columns = ["steady ERLE (dB)", "audible fraction",
+                        "mean excess (dB)"]
+
+    noise_frac = noise.pivot_table(values="audibility_fraction",
+                                   index="level", columns="system",
+                                   aggfunc="mean") \
+        .reindex(["no_noise", "snr20", "snr10"])[sys_order]
+    noise_frac.columns.name = None
+    noise_exc = noise.pivot_table(values="audibility_excess_db",
+                                  index="level", columns="system",
+                                  aggfunc="mean") \
+        .reindex(["no_noise", "snr20", "snr10"])[sys_order]
+    noise_exc.columns.name = None
+
+    wl_aud = wl.pivot_table(
+        values=["erle_steady_state_db", "audibility_fraction",
+                "audibility_excess_db"],
+        index="level", aggfunc="mean").reindex(wl_order)
+    wl_aud = wl_aud[["erle_steady_state_db", "audibility_fraction",
+                     "audibility_excess_db"]]
+    wl_aud.columns = ["steady ERLE (dB)", "audible fraction",
+                      "mean excess (dB)"]
+    wl_aud.index = [s.replace("bit", " bits") for s in wl_aud.index]
+    none_a_excess = runs[(runs.stage == "a") & (runs.system == "none")
+                         ].audibility_excess_db
+    base_frac = {
+        s: base_all[base_all.system == s].sort_values("seed")
+        .audibility_fraction.round(2).tolist()
+        for s in ("nlms_f64", "speex")}
+
+    # Reconstruction QC and decimation materiality (far-single rows,
+    # where the trajectory is exercised).
+    fs_rows = runs[(runs.talk == "far_single") & (runs.status == "ok")]
+    f64_fs = fs_rows[fs_rows.system == "nlms_f64"]
+    q15_fs = fs_rows[fs_rows.system == "nlms_q15"]
+    f64_traj_dfrac = (f64_fs.audibility_fraction_traj
+                      - f64_fs.audibility_fraction)
+    f64_interp_dfrac = (f64_fs.audibility_fraction_interp
+                        - f64_fs.audibility_fraction)
+    q15_traj_dfrac = (q15_fs.audibility_fraction_traj
+                      - q15_fs.audibility_fraction)
+
+    # Two-run approximation error bar: cells where d != d_echo only
+    # (noise and double-talk; in no-noise far-single the two runs are
+    # bit-identical by construction and the diff is exactly 0).
+    speex_two = runs[(runs.system == "speex")
+                     & (runs.speex_tworun_erle_diff_db.notna())
+                     & ((runs.noise_type != "none")
+                        | (runs.talk == "double"))]
+    two_diff = speex_two.speex_tworun_erle_diff_db
+
     dt_nlms = talk[(talk.level == "double") & (talk.system == "nlms_f64")] \
         .sort_values("seed")
     dt_seed_strs = [
@@ -272,8 +337,9 @@ per condition); {n_ok} completed normally, {n_total - n_ok} diverged
 (all {"`" + "`, `".join(sorted(div.system.unique())) + "`" if len(div)
  else "none"}; §2.4 — the fixed-point system cannot trip the divergence
 detector at all, see §2.8). Tier 1 coverage so far: fixed-point
-arithmetic and the word-length sweep (M7); perceptual audibility (M8)
-and computational cost (M9) follow. All numbers in this report are
+arithmetic and the word-length sweep (M7) and perceptual audibility of
+residual echo (M8); computational cost (M9) follows. All numbers in this
+report are
 rendered from `results/raw/*.csv` by `scripts/render_report.py`; run
 provenance (git SHA per row): {", ".join(git_shas)}.
 
@@ -463,6 +529,67 @@ Scalar summaries of all of these land as columns in `runs.csv`
 (`n_stall_events`, `n_tap_stalls`, `n_sat_*`, `sat_first_time_s`,
 `coeff_div_steady_db` = median over the final
 {met_cfg["steady_state_last_fraction"]:.0%} of the divergence curve).
+
+**Perceptual audibility of residual echo** (Tier 1, spec §8.7). ERLE is
+an energy ratio; audibility depends on masking. A simplified
+simultaneous-masking model is implemented in `src/psychoacoustic.py` —
+deliberately not an off-the-shelf PEAQ/psychoacoustics package, because
+the analysis asks a *relative* question (which system's residual is
+more audible under the same masker), and a fixed-offset simplified
+model biases all systems identically, so comparative conclusions
+survive the simplification. Model, with every constant in
+`config/scenarios.yaml` under `audibility:`:
+{aud_cfg["stft_nperseg"]}-sample Hann STFT with a
+{aud_cfg["stft_hop"]}-sample hop (one 20 ms segmentation frame, so
+STFT frames map 1:1 onto ERLE-valid frames); power mapped to Bark
+bands via the Zwicker–Terhardt arctan approximation
+(z = {aud_cfg["bark_a"]:g}·arctan({aud_cfg["bark_b"]:g}·f) +
+{aud_cfg["bark_c"]:g}·arctan((f/{aud_cfg["bark_d_hz"]:g})²));
+two-slope spreading ({aud_cfg["spreading_lower_db_per_bark"]:g} dB/Bark
+toward lower bands, {aud_cfg["spreading_upper_db_per_bark"]:g} dB/Bark
+toward higher); threshold = spread masker power −
+{aud_cfg["masking_offset_db"]:g} dB, floored at
+{aud_cfg["threshold_floor_db"]:g} dB re full-scale² band power.
+
+The masker is near-end speech plus noise (s + v). Audibility is
+computed **over the same ERLE-valid (far-single) frames the ERLE
+metric uses**, so the two are comparable row by row — which means the
+masker over those frames is the background noise where present, and
+silence in no-noise cells (near-end speech is by definition inactive
+during far-single frames). In silent-masker cells the threshold is the
+constant floor — the absolute-threshold proxy; without it those cells
+would report ~100% audibility by construction. The floor is a fixed
+constant, not a physiological curve, and is identical across systems.
+
+Outputs per run: fraction of time–frequency (Bark band × frame) units
+in which the residual exceeds the threshold, and the mean excess above
+threshold in dB over those units.
+
+**Residual isolation.** For the linear-subtraction systems (`none`,
+`nlms_f64`, `nlms_q15`) the residual is computed by the exact component
+identity r = e − s − v, which for e = d − y and d = d_echo + s + v is
+algebraically identical to the spec's decomposition d_echo − y(w(n))
+evaluated with the *exact per-sample* coefficients — the recorded-
+trajectory method at a snapshot every sample. It is exact for
+`nlms_f64`, and exact for `nlms_q15` except at samples where the error
+narrowing saturated (counted per run; zero in clean cells). The
+recorded-trajectory reconstruction itself (coefficients held at the
+block-start state between {q15_cfg["record_every"]}-sample snapshots;
+also linearly interpolated for the float path — interpolating int16
+states is not Q15 arithmetic, so the fixed-point path is hold-only, and
+its reconstruction runs the same saturating Q15 arithmetic as the
+filter) is still computed on every run: its error against the exact
+output is a QC column, and audibility fractions from the trajectory
+residuals are recorded alongside the primary ones. §2.9 reports what
+that QC found. For `speex`, whose coefficients are not exposed and
+whose internal DC notch on the microphone path breaks the exact
+identity, the spec's **two-run approximation** is used: the same
+configuration is run again on an echo-only microphone signal and that
+run's output is taken as the residual. Adaptation trajectories differ
+between the two runs, making this an approximation, not an exact
+decomposition; the ERLE difference between the two runs over
+far-single segments is recorded per run as the approximation's error
+bar (§2.9).
 
 **Divergence**: an output is flagged diverged at the first sample that is
 non-finite or exceeds 10× the peak of |d| (+20 dB); the onset time is
@@ -720,7 +847,8 @@ float shadow inside the Q15 run is itself the diverging recursion, so
 the column measures separation from a diverged trajectory — which is
 the point: there is no meaningful float solution left to track.)
 
-Two caveats keep this honest. First, the divergence detector
+Two caveats keep this honest — see also §2.9's audibility view of the
+same cells. First, the divergence detector
 (non-finite or >10× peak |d|) **cannot fire** for `nlms_q15`: int16
 output can never exceed ~5× the peak of a signal recorded with
 {lvl_cfg["int16_headroom_db"]:g} dB headroom, so `status = ok` means
@@ -731,6 +859,112 @@ still echo leaking through, and the coefficient state ends far from the
 float solution. Saturation acts as a crude, implicit safety net — an
 architectural side effect, not adaptation control; Speex's explicit
 protection achieves bounded *and* useful (§2.2–2.3).
+
+### 2.9 Perceptual audibility of residual echo
+
+Method and residual-isolation definitions in §1.4. Baseline cell
+(RT60 0.4 s, 1.0 m, far single-talk, no noise — threshold is the
+constant floor), mean over {n_seeds} seeds:
+
+{md_table(aud_base, "system", "{:.2f}")}
+
+Across the noise axis (the cells with a real masker):
+
+**audible fraction**
+
+{md_table(noise_frac, "condition", "{:.2f}")}
+
+**mean excess above threshold (dB)**
+
+{md_table(noise_exc, "condition", "{:.2f}")}
+
+![Audibility](figures/audibility.png)
+
+Two readings of the noise tables before the targeted comparisons.
+First, the masking model behaves as a masking model should: `speex`'s
+audible fraction falls monotonically as the noise masker strengthens
+({noise_frac.loc["no_noise", "speex"]:.2f} →
+{noise_frac.loc["snr20", "speex"]:.2f} →
+{noise_frac.loc["snr10", "speex"]:.2f}) — the same residual level
+disappears under a louder masker. Second, the float NLMS rows in the
+noise cells include its diverged runs, and audibility renders §2.8's
+containment story perceptually: `nlms_f64`'s "residual" (which the
+component identity correctly charges with the diverging output)
+exceeds threshold in ~100% of units at
+{noise_exc.loc["snr10", "nlms_f64"]:.1f} dB mean excess at 10 dB SNR —
+*worse than the unprocessed echo*
+({noise_exc.loc["snr10", "none"]:.1f} dB) — while the bounded
+`nlms_q15` sits at {noise_exc.loc["snr10", "nlms_q15"]:.1f} dB,
+audibly better than doing nothing even where its coefficients are far
+from the float solution.
+
+The three comparisons this layer was built to check:
+
+- **`nlms_q15` (15 bits) vs `nlms_f64`, baseline.** ERLE
+  {aud_base.loc["nlms_q15", "steady ERLE (dB)"]:.1f} vs
+  {aud_base.loc["nlms_f64", "steady ERLE (dB)"]:.1f} dB; mean excess
+  {aud_base.loc["nlms_q15", "mean excess (dB)"]:.1f} vs
+  {aud_base.loc["nlms_f64", "mean excess (dB)"]:.1f} dB — the
+  audibility gap ({aud_base.loc["nlms_q15", "mean excess (dB)"]
+                   - aud_base.loc["nlms_f64", "mean excess (dB)"]:+.1f}
+  dB) tracks the ERLE gap
+  ({aud_base.loc["nlms_f64", "steady ERLE (dB)"]
+    - aud_base.loc["nlms_q15", "steady ERLE (dB)"]:.1f} dB) rather
+  than exceeding it: the Q15 arithmetic's extra residual behaves, to
+  this masking model, like ordinary additional residual echo.
+- **Masked word lengths.** Audibility agrees with ERLE's
+  worse-than-passthrough verdict and sharpens it:
+
+{md_table(wl_aud, "word length", "{:.2f}")}
+
+  The masked filters' mean excess exceeds even the unprocessed echo's
+  ({none_a_excess.mean():.1f} dB mean across clean Stage A cells) —
+  the injected limit-cycle jitter is not just energetically but
+  perceptually worse than doing nothing.
+- **`speex` vs `nlms_f64`, baseline — the case this metric exists
+  for.** ERLE is effectively equal
+  ({aud_base.loc["speex", "steady ERLE (dB)"]:.1f} vs
+  {aud_base.loc["nlms_f64", "steady ERLE (dB)"]:.1f} dB), yet speex's
+  residual exceeds the threshold in
+  {aud_base.loc["speex", "audible fraction"]:.2f} of TF units against
+  f64's {aud_base.loc["nlms_f64", "audible fraction"]:.2f}, at nearly
+  identical mean excess
+  ({aud_base.loc["speex", "mean excess (dB)"]:.1f} vs
+  {aud_base.loc["nlms_f64", "mean excess (dB)"]:.1f} dB) — fewer
+  audible units, similar loudness where audible. The direction is
+  consistent across all seeds (speex {base_frac["speex"]},
+  f64 {base_frac["nlms_f64"]}), and in these no-noise cells the
+  two-run speex residual is exact (d = d_echo), so this is not an
+  approximation artifact. Equal energy suppression, differently
+  distributed residual: an energy-only metric cannot see this
+  difference, which is precisely the point of §8.7. (A plausible
+  mechanism — the MDF's per-band adaptation shaping residual energy
+  away from isolated TF regions — is not further diagnosed here.)
+
+**QC: the spec's suggested snapshot rate is too coarse for exact
+isolation.** The recorded-trajectory reconstruction (held between
+{q15_cfg["record_every"]}-sample snapshots) misses the exact output by
+{f64_fs.recon_err_db.mean():.1f} dB (hold) /
+{f64_fs.recon_err_interp_db.mean():.1f} dB (interpolated) on average
+for `nlms_f64` over far-single runs — comparable to or larger than the
+residual itself at ~25 dB ERLE, which is why the exact identity is the
+primary isolation path (§1.4). Had the trajectory residual been used,
+audibility fractions would read
+{f64_traj_dfrac.mean():+.3f} (hold) / {f64_interp_dfrac.mean():+.3f}
+(interpolated) higher on average for `nlms_f64`
+({q15_traj_dfrac.mean():+.3f} for `nlms_q15`, whose own quantisation
+noise dominates the decimation error). At μ = 0.5 the sample-wise
+NLMS coefficient state moves materially within 10 ms; a faithful
+trajectory-based isolation would need a much finer snapshot rate.
+
+**Two-run approximation error bar (`speex`).** In no-noise far-single
+cells the two runs are bit-identical by construction (d = d_echo) and
+the difference is exactly zero. Where the microphone signals differ
+(noise and double-talk cells, n = {len(speex_two)} runs), the echo-only
+run's steady-state ERLE differs from the primary run's by
+{two_diff.mean():+.1f} dB on average (range
+{two_diff.min():+.1f} to {two_diff.max():+.1f} dB) — the scale of
+trust to attach to speex audibility numbers in those cells.
 
 ## 3. Discussion
 
@@ -854,6 +1088,30 @@ diverged canceller screeches and a saturated one merely underperforms.
   output cannot exceed the 10×-peak threshold, so `status = ok` on a
   fixed-point row certifies boundedness only (§2.8); ERLE,
   misalignment, and divergence-from-float carry the health information.
+- **The speex audibility numbers rest on the two-run approximation.**
+  Adaptation trajectories differ between the primary and echo-only
+  runs, so the speex residual is approximate where the microphone
+  signals differ; the per-run ERLE difference between the two runs is
+  the recorded error bar (§2.9). The exact component identity is not
+  applicable to speex because of its internal DC notch on the
+  microphone path.
+- **The masking model is relative, not absolute.** Fixed offset, fixed
+  threshold floor, no outer/middle-ear weighting, no temporal masking:
+  audible fractions and excesses support comparisons *between systems
+  under the same masker*, not statements about what a listener would
+  hear in absolute terms. Constants were fixed before results were
+  seen and not adjusted afterward.
+- **Audibility is measured on far-single frames only** (deliberately,
+  for row-by-row comparability with ERLE). Masking of residual echo by
+  the near-end talker's own speech during double-talk — the condition
+  where echo is most strongly masked in practice — is therefore not
+  measured; over the frames used, the masker is background noise or
+  silence.
+- **Trajectory-based isolation at the recorded snapshot rate is not
+  exact** (§2.9): at μ = 0.5 the coefficient state moves materially
+  within the {q15_cfg["record_every"]}-sample snapshot interval, so the
+  exact component identity is the primary isolation path and the
+  trajectory reconstruction serves as QC instrumentation.
 - **Convergence metric construction.** Relative-to-own-steady-state
   convergence times are not comparable across systems with different
   steady states (§1.4, §3.4).

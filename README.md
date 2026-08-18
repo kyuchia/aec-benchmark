@@ -19,8 +19,10 @@ NLMS step size, and effective coefficient word length (15/11/9/7 bits, via
 low-bit masking of the Q15 coefficients) one factor at a time. Metrics:
 activity-segmented short-time ERLE, convergence time, double-talk near-end
 distortion (segmental SNR, STOI, PESQ, log-spectral distance), coefficient
-misalignment against the true echo path, and fixed-point stall/saturation
-event counts.
+misalignment against the true echo path, fixed-point stall/saturation
+event counts, and perceptual audibility of the isolated residual echo
+(simplified Bark-domain masking model; exact residual isolation for the
+linear systems, the spec's two-run approximation for SpeexDSP).
 
 **Findings and figures: [results/report.md](results/report.md).** Every
 number in the report is rendered from `results/raw/*.csv` by script; nothing
@@ -96,6 +98,7 @@ src/                    library code and the batch entry point
   aec_nlms_fixed.py     Q15 fixed-point NLMS (bit-exact vs naive reference)
   aec_speex.py          SpeexDSP ctypes binding
   metrics.py            ERLE, convergence, distortion, misalignment
+  psychoacoustic.py     residual-echo isolation + masking-based audibility
   plotting.py           figure generation (reads persisted data only)
   run_experiment.py     batch driver / single-run debug entry point
 scripts/                setup + rendering commands (fetch, figures, report)
