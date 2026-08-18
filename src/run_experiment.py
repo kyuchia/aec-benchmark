@@ -39,6 +39,7 @@ import yaml
 
 import metrics
 from aec_nlms import nlms
+from aec_nlms_fixed import nlms_q15
 from aec_speex import run_speex_aec
 from room import RoomRirs, build_rirs
 from segment import Segmentation, segment
@@ -72,6 +73,11 @@ CSV_FIELDS = [
     "convergence_time_s", "converged",
     "segsnr_db", "stoi", "pesq_wb", "lsd_db",
     "misalignment_final_db",
+    "mu_q15", "delta_q30", "coeff_bits",
+    "n_stall_events", "stall_first_time_s", "n_tap_stalls",
+    "n_sat_total", "n_sat_y", "n_sat_err", "n_sat_gain", "n_sat_coeff",
+    "n_sat_coeff_taps", "sat_first_time_s",
+    "coeff_div_final_db", "coeff_div_steady_db",
     "far_speaker", "near_speaker",
     "wall_time_s", "git_sha",
 ]
@@ -158,10 +164,78 @@ def run_speex(x: np.ndarray, d: np.ndarray, scale: float, sys_params: dict,
     }, {}
 
 
+def run_nlms_q15(x: np.ndarray, d: np.ndarray, scale: float,
+                 sys_params: dict,
+                 sample_rate: int) -> tuple[np.ndarray, dict, dict]:
+    """Q15 fixed-point NLMS on the run's shared int16 path.
+
+    x and d are quantised with the identical scaling constant as speex
+    and none. Since both are scaled by the same factor, the echo path in
+    the int16 domain is unchanged, so w/2^15 estimates h_echo directly
+    (no rescaling before misalignment). The in-loop float64 shadow
+    filter sees the same quantised input, isolating arithmetic
+    degradation from input quantisation in the divergence curve.
+    """
+    L = int(round(sys_params["filter_length_ms"] * 1e-3 * sample_rate))
+    mu_q15 = int(round(float(sys_params["mu"]) * 32768))
+    delta_q30 = max(1, int(round(float(sys_params["delta"]) * (1 << 30))))
+    coeff_bits = int(sys_params.get("coeff_bits", 15))
+    record_every = sys_params.get("record_every")
+    x16 = float_to_int16(x, scale, name="x (nlms_q15)")
+    d16 = float_to_int16(d, scale, name="d (nlms_q15)")
+    out = nlms_q15(x16, d16, L=L, mu_q15=mu_q15, delta_q30=delta_q30,
+                   coeff_bits=coeff_bits,
+                   record_every=int(record_every) if record_every else None,
+                   shadow_float=True)
+
+    extras = {
+        "w_final": out["w_final"] / 32768.0,  # int16-domain estimate of h
+        "w_final_q15": out["w_final"],
+        "stall_positions": out["stall_positions"],
+        "tap_stalls_per_sample": out["tap_stalls_per_sample"],
+        "coeff_div_db": out["coeff_div_db"],
+    }
+    for site, pos in out["sat_positions"].items():
+        extras[f"sat_positions_{site}"] = pos
+    if out["w_traj"] is not None:
+        extras["w_traj"] = out["w_traj"] / 32768.0
+
+    sc = out["sat_counts"]
+    all_sat = np.concatenate(list(out["sat_positions"].values()))
+    div = out["coeff_div_db"][np.isfinite(out["coeff_div_db"])]
+    n_steady = max(1, int(round(0.3 * len(div))))
+
+    def first_time_s(pos: np.ndarray) -> float | None:
+        return float(pos.min() / sample_rate) if len(pos) else None
+
+    meta = {
+        "filter_length_ms": sys_params["filter_length_ms"],
+        "mu": sys_params["mu"],
+        "mu_q15": mu_q15,
+        "delta_q30": delta_q30,
+        "coeff_bits": coeff_bits,
+        "n_stall_events": out["n_stall_events"],
+        "stall_first_time_s": first_time_s(out["stall_positions"]),
+        "n_tap_stalls": out["n_tap_stalls"],
+        "n_sat_total": sum(sc.values()),
+        "n_sat_y": sc["y"],
+        "n_sat_err": sc["err"],
+        "n_sat_gain": sc["gain"],
+        "n_sat_coeff": sc["coeff"],
+        "n_sat_coeff_taps": out["n_sat_coeff_taps"],
+        "sat_first_time_s": first_time_s(all_sat),
+        "coeff_div_final_db": float(div[-1]) if len(div) else None,
+        "coeff_div_steady_db": (float(np.median(div[-n_steady:]))
+                                if len(div) else None),
+    }
+    return int16_to_float(out["e"], scale), meta, extras
+
+
 SYSTEM_RUNNERS = {
     "none": run_none,
     "nlms_f64": run_nlms_f64,
     "speex": run_speex,
+    "nlms_q15": run_nlms_q15,
 }
 
 
@@ -382,15 +456,17 @@ def process_row(ctx: BatchContext, spec: dict, sha: str) -> dict:
             "int16_scale": scale,
             "int16_headroom_db": cfg["levels"]["int16_headroom_db"],
             "filter_length_ms": sys_params.get("filter_length_ms"),
-            "mu": sys_params.get("mu") if spec["system"] == "nlms_f64" else None,
+            "mu": sys_params.get("mu")
+            if spec["system"] in ("nlms_f64", "nlms_q15") else None,
             "frame_size": sys_params.get("frame_size")
             if spec["system"] == "speex" else None,
             "far_speaker": sigs.meta.get("far_speaker"),
             "near_speaker": sigs.meta.get("near_speaker"),
         })
 
-        e, _sys_meta, extras = SYSTEM_RUNNERS[spec["system"]](
+        e, sys_meta, extras = SYSTEM_RUNNERS[spec["system"]](
             sigs.x, sigs.d, scale, sys_params, sample_rate)
+        row.update({k: v for k, v in sys_meta.items() if k in CSV_FIELDS})
 
         label = spec["output_label"]
         np.savez_compressed(cell_dir / f"e_{label}.npz", e=e, **extras)
@@ -449,7 +525,7 @@ def expand_batch(cfg: dict) -> list[dict]:
         # because equal cells share one output file — a later run of the
         # same (cell, system, params) without the flag would overwrite the
         # trajectory away.
-        return (system == "nlms_f64" and not overrides
+        return (system in ("nlms_f64", "nlms_q15") and not overrides
                 and scenario == defaults)
 
     a = batch["stage_a"]
@@ -505,6 +581,18 @@ def expand_batch(cfg: dict) -> list[dict]:
         for system in b["mu"].get("reference_systems", []):
             specs.append(_make_spec("b", "mu", "reference", dict(defaults),
                                     seed, system))
+
+    # Word-length sweep: every level, including the unmasked 15, carries an
+    # explicit coeff_bits override so the four sweep rows are constructed
+    # identically (the 15-bit row duplicates the baseline nlms_q15 run
+    # under its own label rather than aliasing it).
+    for bits in b["word_length"]["bits"]:
+        scenario = dict(defaults)
+        for seed in range(n_seeds):
+            for system in b["word_length"]["systems"]:
+                specs.append(_make_spec(
+                    "b", "word_length", f"{bits}bit", scenario, seed,
+                    system, overrides={"coeff_bits": bits}))
 
     run_ids = [s["run_id"] for s in specs]
     if len(run_ids) != len(set(run_ids)):
@@ -578,7 +666,8 @@ def run_single(cfg: dict, scenario_id: str, seed: int,
     sha = git_sha()
     for system in systems:
         spec = _make_spec("single", scenario_id, scenario_id, scenario, seed,
-                          system, record_traj=(system == "nlms_f64"))
+                          system,
+                          record_traj=(system in ("nlms_f64", "nlms_q15")))
         row = process_row(ctx, spec, sha)
         conv = row.get("convergence_time_s")
         conv_str = f"{conv:.2f} s" if conv is not None else "not converged"

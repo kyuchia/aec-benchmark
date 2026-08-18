@@ -62,6 +62,11 @@ def _sat(v: int) -> tuple[int, bool]:
     return v, False
 
 
+def _trunc(v: int, k: int) -> int:
+    """Magnitude truncation (toward zero), the arithmetic-path convention."""
+    return -((-v) >> k) if v < 0 else v >> k
+
+
 def _nlms_q15_naive(x16, d16, L, mu, delta, bits):
     n = len(x16)
     shift = 15 - bits
@@ -74,7 +79,7 @@ def _nlms_q15_naive(x16, d16, L, mu, delta, bits):
     for i in range(n):
         buf = [int(x16[i])] + buf[:-1]
         acc = sum(wk * bk for wk, bk in zip(w, buf))
-        y, s_ = _sat(acc >> 15)
+        y, s_ = _sat(_trunc(acc, 15))
         sat_counts["y"] += s_
         err, s_ = _sat(int(d16[i]) - y)
         sat_counts["err"] += s_
@@ -85,13 +90,13 @@ def _nlms_q15_naive(x16, d16, L, mu, delta, bits):
             s = p64.bit_length() - 15
             m = p64 >> s if s >= 0 else p64 << -s
             r = min((1 << 29) // m, 32767)
-            g, s_ = _sat((mu * err * r) >> (14 + s))  # g = 2^15*mu*err/p64
+            g, s_ = _sat(_trunc(mu * err * r, 14 + s))  # g = 2^15*mu*err/p64
             sat_counts["gain"] += s_
             if g != 0:
                 new_w = []
                 clipped = changed = False
                 for k in range(L):
-                    cand, s_ = _sat(w[k] + ((g * buf[k]) >> 15))
+                    cand, s_ = _sat(w[k] + _trunc(g * buf[k], 15))
                     clipped |= s_
                     if shift:
                         cand = (cand >> shift) << shift
@@ -255,13 +260,14 @@ def test_stalls_after_convergence():
 
 def test_masking_degrades_without_full_stalls():
     # The stall detector evaluates the update *after* the mask, yet
-    # coarser masking produces FEWER full-stall events, not more: floor
-    # masking erases only positive sub-LSB updates, while negative ones
-    # step a full effective LSB downward, keeping some tap moving and
-    # the error (hence gain) elevated. The filter jitters in a limit
-    # cycle instead of halting, so the degradation appears as a rising
-    # misalignment floor — the word-length sweep's actual signal — not
-    # as stall counts. Asserted here so the mechanism stays documented.
+    # coarser masking produces FEWER full-stall events, not more: the
+    # floor mask erases sub-effective-LSB updates only when positive,
+    # while negative ones step a full effective LSB downward, keeping
+    # some tap moving and the error (hence gain) elevated. The filter
+    # jitters in a limit cycle instead of halting, so the degradation
+    # appears as a rising misalignment floor — the word-length sweep's
+    # actual signal — not as stall counts. Asserted here so the
+    # mechanism stays documented.
     x16, d16, h = _echo_signals(seed=5, n=20000)
     res = {}
     for bits in (15, 7):
@@ -270,7 +276,7 @@ def test_masking_degrades_without_full_stalls():
         res[bits] = (out["n_stall_events"],
                      _misalignment_db(out["w_final"] / 32768.0, h))
     assert res[7][0] < res[15][0], res  # the inversion, see comment
-    # ~-44 dB at 15 bits vs ~+4 dB at 7 bits on this signal; a >= 20 dB
+    # ~-70 dB at 15 bits vs ~+4 dB at 7 bits on this signal; a >= 20 dB
     # gap is far outside seed noise.
     assert res[7][1] > res[15][1] + 20.0, res
 

@@ -96,6 +96,17 @@ systems:
     mu: 0.5
     delta: 1.0e-6
     record_every: 160    # coefficient-trajectory snapshot interval (samples)
+  nlms_q15:
+    # Q15 fixed-point NLMS (aec_nlms_fixed.py). mu/delta are stated in the
+    # same real-valued units as nlms_f64; the runner converts them to Q15/Q30
+    # integers (mu_q15 = round(mu * 2^15), delta_q30 = round(delta * 2^30))
+    # and records both in the run row. coeff_bits=15 is full Q15 precision;
+    # the word-length sweep overrides it per level.
+    filter_length_ms: 200.0
+    mu: 0.5
+    delta: 1.0e-6
+    record_every: 160
+    coeff_bits: 15
 
 scenario_defaults: &defaults
   rt60_s: 0.4
@@ -117,7 +128,7 @@ scenarios:
 batch:
   stage_a:
     # Main effects: 2-factor full cross, far single-talk, no noise.
-    systems: [none, nlms_f64, speex]
+    systems: [none, nlms_f64, speex, nlms_q15]
     rt60_levels_s: [0.2, 0.4, 0.6, 0.8]
     distance_levels_m: [0.3, 1.0, 2.5]
     scenario:
@@ -129,17 +140,17 @@ batch:
   stage_b:
     # One factor at a time around the baseline (scenario_defaults above).
     talk:
-      systems: [none, nlms_f64, speex]
+      systems: [none, nlms_f64, speex, nlms_q15]
       levels: [far_single, double, near_single]
     noise:
-      systems: [none, nlms_f64, speex]
+      systems: [none, nlms_f64, speex, nlms_q15]
       levels:
         - {noise_type: none, snr_db: null}
         - {noise_type: speech_shaped, snr_db: 20.0}
         - {noise_type: speech_shaped, snr_db: 10.0}
     tail_length:
-      # System parameter sweep (filter_length), both adaptive systems.
-      systems: [nlms_f64, speex]
+      # System parameter sweep (filter_length), all adaptive systems.
+      systems: [nlms_f64, speex, nlms_q15]
       levels_ms: [50.0, 100.0, 200.0, 400.0]
     mu:
       # nlms_f64 only — speex has no step size. Speex runs once at its
@@ -148,3 +159,8 @@ batch:
       systems: [nlms_f64]
       reference_systems: [speex]
       levels: [0.1, 0.3, 0.5, 0.9]
+    word_length:
+      # Effective coefficient word length via low-bit masking (nlms_q15
+      # only; 15 = unmasked full Q15). The project's headline figure.
+      systems: [nlms_q15]
+      bits: [15, 11, 9, 7]

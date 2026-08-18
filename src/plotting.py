@@ -22,6 +22,7 @@ SYSTEM_COLORS = {
     "none": "#888888",
     "nlms_f64": "#1f77b4",
     "speex": "#ff7f0e",
+    "nlms_q15": "#d62728",
 }
 
 
@@ -72,7 +73,8 @@ def plot_segmentation_diagnostic(run_dir: Path, out_path: Path) -> None:
 
 
 def plot_baseline_curves(csv_path: Path, cell_dir: Path, out_dir: Path,
-                         systems: list[str] = ("none", "nlms_f64", "speex"),
+                         systems: list[str] = ("none", "nlms_f64", "speex",
+                                               "nlms_q15"),
                          seed: int = 0) -> None:
     """Baseline-cell ERLE curves (plus the recorded NLMS misalignment
     trajectory) for one seed. Curves come from the persisted per-system
@@ -101,11 +103,19 @@ def plot_baseline_curves(csv_path: Path, cell_dir: Path, out_dir: Path,
     fig.savefig(out_dir / "baseline_erle.png", dpi=120, bbox_inches="tight")
     plt.close(fig)
 
-    m = np.load(cell_dir / "metrics_nlms_f64.npz")
-    if "misalignment_curve_db" in m:
-        fig, ax = plt.subplots(figsize=(9, 4))
+    fig, ax = plt.subplots(figsize=(9, 4))
+    plotted = False
+    for system in ("nlms_f64", "nlms_q15"):
+        path = cell_dir / f"metrics_{system}.npz"
+        if not path.exists():
+            continue
+        m = np.load(path)
+        if "misalignment_curve_db" not in m:
+            continue
         ax.plot(m["misalignment_times_s"], m["misalignment_curve_db"],
-                lw=1.2, color=SYSTEM_COLORS["nlms_f64"], label="nlms_f64")
+                lw=1.2, color=SYSTEM_COLORS[system], label=system)
+        plotted = True
+    if plotted:
         ax.set_xlabel("time (s)")
         ax.set_ylabel("misalignment (dB)")
         ax.grid(alpha=0.3)
@@ -115,7 +125,7 @@ def plot_baseline_curves(csv_path: Path, cell_dir: Path, out_dir: Path,
         fig.tight_layout()
         fig.savefig(out_dir / "baseline_misalignment.png", dpi=120,
                     bbox_inches="tight")
-        plt.close(fig)
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +193,8 @@ def plot_stage_a(csv_path: Path, out_dir: Path) -> None:
 def _strip_axis(ax, sub: pd.DataFrame, levels: list, value_col: str,
                 level_col: str = "level") -> None:
     """Per-seed points, jittered per system; diverged rows drawn as x."""
-    offsets = {"none": -0.22, "nlms_f64": 0.0, "speex": 0.22}
+    offsets = {"none": -0.3, "nlms_f64": -0.1, "nlms_q15": 0.1,
+               "speex": 0.3}
     for system, grp in sub.groupby("system"):
         color = SYSTEM_COLORS.get(system, "#333333")
         for k, level in enumerate(levels):
@@ -292,6 +303,90 @@ def plot_stage_b_mu(csv_path: Path, out_dir: Path) -> None:
     plt.close(fig)
 
 
+def plot_word_length(csv_path: Path, out_dir: Path) -> None:
+    """Headline figure: effective coefficient word length vs steady-state
+    ERLE and convergence time, per-seed points, with the float NLMS at
+    the same scenario as a reference line and 0 dB (= no processing)
+    marked. Non-converged runs are drawn at the axis top as open
+    triangles rather than silently dropped."""
+    df = pd.read_csv(csv_path)
+    sub = df[(df["stage"] == "b") & (df["axis"] == "word_length")]
+    levels = ["15bit", "11bit", "9bit", "7bit"]
+    f64_ref = df[(df["stage"] == "a") & (df["system"] == "nlms_f64")
+                 & (df["scenario_key"].str.startswith("rt0.4_d1_"))]
+    color = SYSTEM_COLORS["nlms_q15"]
+    ref_color = SYSTEM_COLORS["nlms_f64"]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.4))
+    for ax, col, ylabel in [(ax1, "erle_steady_state_db",
+                             "steady-state ERLE (dB)"),
+                            (ax2, "convergence_time_s",
+                             "convergence time (s)")]:
+        for k, level in enumerate(levels):
+            pts = sub[sub["level"] == level]
+            xs = k + (pts["seed"].to_numpy() - 1) * 0.06
+            ys = pts[col].to_numpy(dtype=float)
+            ok = np.isfinite(ys)
+            ax.scatter(xs[ok], ys[ok], s=34, color=color, zorder=3,
+                       label="nlms_q15 (masked)" if k == 0 else None)
+            if len(ys[ok]):
+                ax.hlines(np.mean(ys[ok]), k - 0.28, k + 0.28, color=color,
+                          lw=1.1, alpha=0.6)
+            if (~ok).any():  # non-converged: flag at top, never dropped
+                top = np.nanmax(sub[col].to_numpy(dtype=float))
+                ax.scatter(xs[~ok], np.full((~ok).sum(), top), s=44,
+                           facecolors="none", edgecolors=color, marker="^",
+                           zorder=3,
+                           label="not converged" if
+                           "not converged" not in
+                           [h.get_label() for h in ax.collections]
+                           else None)
+        ax.axhline(f64_ref[col].mean(), color=ref_color, ls="--", lw=1.2,
+                   label="nlms_f64, same scenario (float reference)")
+        if col == "erle_steady_state_db":
+            ax.axhline(0.0, color="#888888", ls=":", lw=1.0,
+                       label="0 dB (no processing)")
+        ax.set_xticks(range(len(levels)),
+                      [lv.replace("bit", "") for lv in levels])
+        ax.set_xlabel("effective coefficient word length (bits)")
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.3, axis="y")
+        ax.legend(fontsize=8)
+    fig.suptitle("Word-length sweep — Q15 NLMS with masked coefficients "
+                 "(per-seed points, bar = mean)", fontsize=11)
+    fig.tight_layout()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_dir / "word_length_sweep.png", dpi=120,
+                bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_q15_float_divergence(cell_dir: Path, out_dir: Path,
+                              sample_rate: int = 16000) -> None:
+    """Baseline cell: per-sample coefficient divergence between the Q15
+    filter and its in-loop float64 shadow on identical quantised input."""
+    path = cell_dir / "e_nlms_q15.npz"
+    if not path.exists():
+        return
+    z = np.load(path)
+    div = z["coeff_div_db"]
+    dec = 16  # plot decimation only; the stored curve is per-sample
+    t = np.arange(len(div))[::dec] / sample_rate
+    fig, ax = plt.subplots(figsize=(9, 4))
+    ax.plot(t, div[::dec], lw=0.9, color=SYSTEM_COLORS["nlms_q15"])
+    ax.set_xlabel("time (s)")
+    ax.set_ylabel("10·log10(‖w_q15/2¹⁵ − w_float‖² / ‖w_float‖²)  (dB)")
+    ax.grid(alpha=0.3)
+    ax.set_title("baseline cell — Q15 coefficient divergence from the "
+                 "float64 shadow filter (identical quantised input)",
+                 fontsize=10)
+    fig.tight_layout()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_dir / "q15_float_divergence.png", dpi=120,
+                bbox_inches="tight")
+    plt.close(fig)
+
+
 def batch_figures(csv_path: Path, out_dir: Path,
                   baseline_cell_dir: Path | None = None) -> None:
     plot_stage_a(csv_path, out_dir)
@@ -299,5 +394,7 @@ def batch_figures(csv_path: Path, out_dir: Path,
     plot_stage_b_noise(csv_path, out_dir)
     plot_stage_b_tail(csv_path, out_dir)
     plot_stage_b_mu(csv_path, out_dir)
+    plot_word_length(csv_path, out_dir)
     if baseline_cell_dir is not None and baseline_cell_dir.is_dir():
         plot_baseline_curves(csv_path, baseline_cell_dir, out_dir)
+        plot_q15_float_divergence(baseline_cell_dir, out_dir)

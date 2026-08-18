@@ -3,19 +3,24 @@
 A reproducible benchmark comparing acoustic echo cancellation (AEC)
 implementations in simulated room conditions. Systems under test: a
 sample-wise float64 NLMS adaptive filter (deliberately without double-talk
-protection) and the SpeexDSP MDF echo canceller (as a linear canceller, no
-preprocessor), against a passthrough reference measured on the same int16
-signal path. All signals are synthesised — LibriSpeech speech convolved with
+protection), a Q15 fixed-point NLMS (saturating arithmetic, block-floating-
+point normalisation, bit-exact against a naive integer reference, with
+stalling/saturation instrumentation and a per-sample coefficient-divergence
+trace against an in-loop float shadow filter), and the SpeexDSP MDF echo
+canceller (as a linear canceller, no preprocessor), against a passthrough
+reference measured on the same int16 signal path. All signals are synthesised — LibriSpeech speech convolved with
 image-source room impulse responses — so every echo path and near-end signal
 is known exactly.
 
 The experiment matrix crosses room reverberation (RT60 0.2–0.8 s, absorption
 calibrated against Schroeder-measured RT60) with loudspeaker–microphone
-distance, then varies talk state, background noise, filter tail length, and
-NLMS step size one factor at a time. Metrics: activity-segmented short-time
-ERLE, convergence time, double-talk near-end distortion (segmental SNR,
-STOI, PESQ, log-spectral distance), and coefficient misalignment against the
-true echo path.
+distance, then varies talk state, background noise, filter tail length,
+NLMS step size, and effective coefficient word length (15/11/9/7 bits, via
+low-bit masking of the Q15 coefficients) one factor at a time. Metrics:
+activity-segmented short-time ERLE, convergence time, double-talk near-end
+distortion (segmental SNR, STOI, PESQ, log-spectral distance), coefficient
+misalignment against the true echo path, and fixed-point stall/saturation
+event counts.
 
 **Findings and figures: [results/report.md](results/report.md).** Every
 number in the report is rendered from `results/raw/*.csv` by script; nothing
@@ -53,7 +58,7 @@ python scripts/make_figures.py        # all figures -> results/figures/
 python scripts/render_report.py       # report      -> results/report.md
 ```
 
-The batch (201 runs) completes in a few minutes on a laptop and is
+The batch (279 runs) completes in roughly 20 minutes on a laptop and is
 deterministic: re-running reproduces every metric column bit-identically.
 Runs that fail or diverge are recorded as rows with a `status` column and a
 reason — the batch never leaves silent gaps, and the row count is asserted.
@@ -88,6 +93,7 @@ src/                    library code and the batch entry point
   signals.py            speech selection, levelling, mixing, int16 scaling
   segment.py            three-state activity segmentation
   aec_nlms.py           float64 NLMS (verified sample-exact)
+  aec_nlms_fixed.py     Q15 fixed-point NLMS (bit-exact vs naive reference)
   aec_speex.py          SpeexDSP ctypes binding
   metrics.py            ERLE, convergence, distortion, misalignment
   plotting.py           figure generation (reads persisted data only)

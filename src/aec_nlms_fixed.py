@@ -30,16 +30,39 @@ All narrowing goes through _sat16_scalar / _sat16_vec — grep those two
 names to enumerate every narrowing site. Between sites everything is
 int64, where the bounds below make wraparound impossible. numpy is never
 allowed to narrow silently: no int16/int32 casts exist in the arithmetic
-path. Right shifts are arithmetic (truncation toward -inf) everywhere,
-matching the word-length mask's >>/<< convention; the sign-dependent bias
-of truncation is part of the system under test, not corrected.
+path.
+
+Rounding convention (this choice is load-bearing — see below)
+-------------------------------------------------------------
+Every product narrowing (y, gain, per-tap update) uses **magnitude
+truncation** — shift toward zero via _trunc_shift_* — matching the
+spec's description of sub-LSB updates "truncating to zero": under
+magnitude truncation an update smaller than 1 LSB vanishes on *both*
+signs, which is the stalling phenomenon §7.3 asks to instrument. The
+word-length mask alone keeps the spec snippet's floor (>>/<<)
+semantics.
+
+A plain arithmetic shift (floor, toward -inf) at the update narrowing
+was implemented first and fails catastrophically on real speech at full
+15-bit precision: floor biases every update by -0.5 LSB in the mean,
+and during speech pauses (tiny |x|, hence vanishing error feedback,
+while err != 0 keeps updates firing) the per-tap bias accumulates
+essentially unopposed — on the baseline scenario the mean coefficient
+drifted to about -22000 of the -32768 rail against true taps of a few
+hundred LSB, producing *positive* misalignment and negative ERLE. The
+stalling/degradation behaviour of any fixed-point NLMS is therefore a
+function of the narrowing convention, not just the word length; a
+floor-truncating implementation behaves qualitatively differently from
+this one. Reported in the study, not hidden here.
 
 Arithmetic path and dynamic range (per sample)
 ----------------------------------------------
     y_acc = sum_k w[k] x[k]      |.| <= L * 2^30 (L <= 2^20 asserted,
                                  so |.| < 2^50)
-    y     = sat16(y_acc >> 15)                          [site 'y']
+    y     = sat16(trunc(y_acc, 15))                     [site 'y']
     err   = sat16(d - y)         |d - y| < 2^17         [site 'err']
+
+(trunc(v, k) = magnitude truncation: |v| >> k with the sign restored.)
 
 Normalisation — block floating point with a per-sample reciprocal.
 Derivation: with M, E, X the Q15 integers for mu, e(n), x(n-k) and
@@ -57,12 +80,12 @@ is computed per sample:
                                  exactly 2^14) clamps to 32767 — a <= 1 LSB
                                  reciprocal rounding, deliberately not
                                  counted as a saturation event
-    g   = sat16((M E r) >> (14 + s))                    [site 'gain']
+    g   = sat16(trunc(M E r, 14 + s))                   [site 'gain']
           |M E r| <= 2^15 * 2^16 * 2^15 = 2^46;  14 + s >= 0 since
           P64 >= 2 (P >= 1 when any tap is nonzero, delta >= 1)
 
 The gain in Q15 units is g = 2^15 M E / P64 (from the derivation below:
-1/P64 ~= r / 2^(29+s), so 2^15 M E r / 2^(29+s) = (M E r) >> (14 + s)).
+1/P64 ~= r / 2^(29+s), so 2^15 M E r / 2^(29+s) narrowed by 14 + s).
 
 g is the Q15 image of mu e / (P + delta). Narrowing it to Q15 *before*
 the tap loop is the classic 16-bit-DSP structure (gain in a register, one
@@ -73,7 +96,7 @@ clips are counted at site 'gain', not hidden. The all-zero window
 structural gain rail during exact far-end silence would swamp the
 instrumentation with meaningless events.
 
-    dw[k] = (g x[k]) >> 15       |g x| <= 2^31
+    dw[k] = trunc(g x[k], 15)    |g x| <= 2^31
     w[k]  = sat16(w[k] + dw[k])                         [site 'coeff']
     w     = quantise_coeffs(w, coeff_bits)   (identity at 15 bits)
 
@@ -82,10 +105,11 @@ Word-length mask
 quantise_coeffs floors each coefficient to a multiple of 2^(15-bits)
 toward -inf (arithmetic >> then <<, the spec's snippet). Applied after
 every update, it simulates *storing* w at reduced precision. Floor
-masking is asymmetric: a positive sub-LSB update is erased (a stall),
-while a negative sub-LSB update steps a full effective LSB downward.
-That asymmetry is a property of the masking scheme under test and shows
-up in the word-length sweep; it is documented, not corrected.
+masking is asymmetric: a nonzero positive update smaller than the
+effective LSB is erased (a stall), while a nonzero negative one steps a
+full effective LSB downward. That asymmetry is a property of the
+masking scheme under test and shows up in the word-length sweep; it is
+documented, not corrected.
 
 Instrumentation
 ---------------
@@ -105,22 +129,28 @@ so the word-length sweep and the stall counts tell one story:
     coefficient did not change. Returned as a per-sample count array
     plus a total.
 
-The two differ because truncation floors toward -inf: a sub-LSB update
-stalls only on the positive side, while a sub-LSB *negative* update
-steps a full effective LSB downward — at every precision (the >>15
-stage at bits=15, the mask's larger LSB below it). Measured consequence
-(see test_masking_degrades_without_full_stalls): as bits decrease,
-full-stall events become *rarer*, not more frequent — the -LSB stepping
-keeps some tap moving and the error (hence the gain) elevated, so the
-filter jitters in a limit cycle around the solution instead of halting.
-Per-tap stalls stay high (~a quarter of active tap-updates, dominated
-by the small-|x| tap population) and roughly constant across bits and
-time. The degradation the word-length sweep measures therefore shows up
-in misalignment/ERLE (the quantisation floor rises with the effective
-LSB), not in the stall counters; that inversion of the naive
-"coarser LSB => more stalling" expectation is a genuine property of
-floor-truncating arithmetic and is reported as a finding, not adjusted
-away.
+At full 15 bits the two agree in character: magnitude truncation kills
+sub-LSB updates on both signs, so a converged filter stalls massively —
+the spec's "adaptation halts" phenomenon at the Q15 noise floor. Under
+the mask the two *diverge*, because the mask floors instead of
+truncating toward zero: an update that survives the arithmetic path
+(|dw| >= 1 Q15 LSB) but is smaller than the effective LSB is erased
+when positive yet amplified to a full -LSB step when negative. Some tap
+therefore keeps moving, the error (hence the gain) stays elevated, and
+the filter jitters in a limit cycle around the solution instead of
+halting. On a small stationary configuration (32 large taps, white
+noise — see test_masking_degrades_without_full_stalls) that limit cycle
+is bounded: fewer stall events than unmasked, graded misalignment
+degradation. At full scale (3200 small-magnitude taps, real speech,
+the benchmark's word-length sweep) the same asymmetry instead acts as
+a one-way ratchet that walks the coefficients to the negative rail —
+the identical floor-bias mechanism described above for update
+arithmetic, re-entering through the coefficient store. Either way the
+naive "coarser LSB => more stalling" expectation fails, and the
+degradation the sweep measures lives in the accuracy metrics, not the
+stall counters. A genuine property of the floor-masking scheme
+(faithful to truncating two's-complement storage), reported as a
+finding, not adjusted away.
 
 Saturation: per-site event positions ('y', 'err', 'gain', 'coeff') and
 counts; for 'coeff' one event per sample with any clipped tap, plus a
@@ -148,6 +178,15 @@ Q15_ONE = 32768  # 2^15
 DELTA_Q30_DEFAULT = 1074  # round(1e-6 * 2^30)
 _RECIP_SHIFT = 29
 _L_MAX = 1 << 20  # keeps |y_acc| <= L * 2^30 < 2^50, far inside int64
+
+
+def _trunc_shift_scalar(v: int, k: int) -> int:
+    """Magnitude truncation: shift |v| right by k, restore the sign."""
+    return -((-v) >> k) if v < 0 else v >> k
+
+
+def _trunc_shift_vec(v: np.ndarray, k: int) -> np.ndarray:
+    return np.where(v >= 0, v >> k, -((-v) >> k))
 
 
 def _sat16_scalar(v: int) -> tuple[int, bool]:
@@ -253,7 +292,7 @@ def nlms_q15(x16: np.ndarray, d16: np.ndarray, L: int, mu_q15: int,
         if i >= L:
             P -= int(xsq[i - L])
 
-        y, sat = _sat16_scalar(int(seg @ w) >> 15)
+        y, sat = _sat16_scalar(_trunc_shift_scalar(int(seg @ w), 15))
         if sat:
             sat_pos["y"].append(i)
         err, sat = _sat16_scalar(int(d16[i]) - y)
@@ -270,12 +309,12 @@ def nlms_q15(x16: np.ndarray, d16: np.ndarray, L: int, mu_q15: int,
             r = (1 << _RECIP_SHIFT) // m
             if r > Q15_MAX:
                 r = Q15_MAX  # m == 2^14 endpoint; reciprocal rounding
-            g, sat = _sat16_scalar(
-                (mu_q15 * err * r) >> (_RECIP_SHIFT + s - 15))
+            g, sat = _sat16_scalar(_trunc_shift_scalar(
+                mu_q15 * err * r, _RECIP_SHIFT + s - 15))
             if sat:
                 sat_pos["gain"].append(i)
             if g != 0:
-                dw = (g * seg) >> 15
+                dw = _trunc_shift_vec(g * seg, 15)
                 w_cand, clip_mask = _sat16_vec(w + dw)
                 n_clipped = int(np.count_nonzero(clip_mask))
                 if n_clipped:
