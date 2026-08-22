@@ -1,4 +1,4 @@
-"""Perceptual audibility of residual echo (spec §8.7).
+"""Perceptual audibility of residual echo.
 
 Two halves, both belonging to the same analysis:
 
@@ -200,7 +200,7 @@ def masking_threshold(masker_bands: np.ndarray,
 def audibility(residual: np.ndarray, masker: np.ndarray,
                erle_valid: np.ndarray, seg_frame_len: int,
                sample_rate: int, aud_cfg: dict) -> dict:
-    """§8.7 outputs over ERLE-valid frames.
+    """Audibility outputs over ERLE-valid frames.
 
     Returns fraction of TF units above threshold, mean excess (dB) over
     those units, unit count, and the per-frame exceedance-fraction

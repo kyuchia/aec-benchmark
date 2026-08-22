@@ -1,6 +1,6 @@
 """Unit tests for the Q15 fixed-point NLMS implementation.
 
-The correctness reference is _nlms_q15_naive below: the spec §7.3
+The correctness reference is _nlms_q15_naive below: the same Q15
 arithmetic executed literally with pure-Python unbounded integers, an
 explicit tap buffer, an explicit saturation function, and per-sample
 recomputation of the window power from the buffer. Python ints cannot
@@ -51,7 +51,7 @@ def _echo_signals(seed: int, n: int, x_rms: float = 0.15) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# Naive reference: §7.3 arithmetic, pure-Python unbounded ints
+# Naive reference: the same arithmetic, pure-Python unbounded ints
 # ---------------------------------------------------------------------------
 
 def _sat(v: int) -> tuple[int, bool]:

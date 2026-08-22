@@ -437,9 +437,10 @@ achieved values are stored in every CSV row.
 
 **Rounding convention (load-bearing).** In `nlms_q15`, every product
 narrowing — filter output, gain, per-tap update — uses **magnitude
-truncation** (shift toward zero), matching the spec's description of
-sub-LSB updates truncating to zero; the word-length mask (§2.7) keeps
-the plain floor `>>`/`<<` semantics of the spec's masking snippet. The
+truncation** (shift toward zero), so that a sub-LSB update truncates to
+zero on either sign — the definition of stalling adopted throughout; the
+word-length mask (§2.7) keeps the plain floor `>>`/`<<` semantics of the
+`(w >> shift) << shift` masking rule. The
 choice is not cosmetic: a floor-truncating (arithmetic-shift) update
 path was implemented first and fails outright at full 15-bit precision
 on real speech — floor biases every update by −0.5 LSB in the mean, and
@@ -552,7 +553,7 @@ Scalar summaries of all of these land as columns in `runs.csv`
 `coeff_div_steady_db` = median over the final
 {met_cfg["steady_state_last_fraction"]:.0%} of the divergence curve).
 
-**Perceptual audibility of residual echo** (Tier 1, spec §8.7). ERLE is
+**Perceptual audibility of residual echo** (Tier 1). ERLE is
 an energy ratio; audibility depends on masking. A simplified
 simultaneous-masking model is implemented in `src/psychoacoustic.py` —
 deliberately not an off-the-shelf PEAQ/psychoacoustics package, because
@@ -590,7 +591,7 @@ threshold in dB over those units.
 **Residual isolation.** For the linear-subtraction systems (`none`,
 `nlms_f64`, `nlms_q15`) the residual is computed by the exact component
 identity r = e − s − v, which for e = d − y and d = d_echo + s + v is
-algebraically identical to the spec's decomposition d_echo − y(w(n))
+algebraically identical to the trajectory decomposition d_echo − y(w(n))
 evaluated with the *exact per-sample* coefficients — the recorded-
 trajectory method at a snapshot every sample. It is exact for
 `nlms_f64`, and exact for `nlms_q15` except at samples where the error
@@ -605,7 +606,7 @@ output is a QC column, and audibility fractions from the trajectory
 residuals are recorded alongside the primary ones. §2.9 reports what
 that QC found. For `speex`, whose coefficients are not exposed and
 whose internal DC notch on the microphone path breaks the exact
-identity, the spec's **two-run approximation** is used: the same
+identity, a **two-run approximation** is used instead: the same
 configuration is run again on an echo-only microphone signal and that
 run's output is taken as the residual. Adaptation trajectories differ
 between the two runs, making this an approximation, not an exact
@@ -801,7 +802,7 @@ designed to trace. Four observations:
    energy, orders of magnitude above ‖h‖²). This is the same
    floor-bias mechanism that rules out floor truncation in the update
    arithmetic (§1.3), re-entering through the coefficient store: the
-   spec's `>>`/`<<` mask faithfully models truncating two's-complement
+   `>>`/`<<` mask faithfully models truncating two's-complement
    storage, and truncating storage is what collapses.
 4. **The stall counters do not carry the degradation signal.**
    Full-stall counts are non-monotone across the sweep
@@ -959,11 +960,12 @@ The three comparisons this layer was built to check:
   two-run speex residual is exact (d = d_echo), so this is not an
   approximation artifact. Equal energy suppression, differently
   distributed residual: an energy-only metric cannot see this
-  difference, which is precisely the point of §8.7. (A plausible
+  difference, which is precisely what this analysis exists to detect.
+  (A plausible
   mechanism — the MDF's per-band adaptation shaping residual energy
   away from isolated TF regions — is not further diagnosed here.)
 
-**QC: the spec's suggested snapshot rate is too coarse for exact
+**QC: a 10 ms coefficient-snapshot rate is too coarse for exact
 isolation.** The recorded-trajectory reconstruction (held between
 {q15_cfg["record_every"]}-sample snapshots) misses the exact output by
 {f64_fs.recon_err_db.mean():.1f} dB (hold) /
@@ -993,7 +995,7 @@ trust to attach to speex audibility numbers in those cells.
 Real-time factor is measured around the canceller call alone (baseline
 cell, {n_seeds} seeds, `scripts/measure_cost.py` →
 `results/raw/cost.csv`); operation counts and state sizes are derived
-analytically (`src/metrics.py`, §8.6 formulas in the docstrings),
+analytically (`src/metrics.py`, formulas in the docstrings),
 never measured:
 
 {md_table(cost_tab, "system", "{:.4f}")}

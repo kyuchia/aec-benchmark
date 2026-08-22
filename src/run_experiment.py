@@ -252,7 +252,7 @@ def merged_sys_params(cfg: dict, system: str, overrides: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Residual-echo isolation + perceptual audibility (spec §8.7)
+# Residual-echo isolation + perceptual audibility
 # ---------------------------------------------------------------------------
 
 def _erle_valid_samples(seg: Segmentation, n: int) -> np.ndarray:
@@ -273,7 +273,7 @@ def residual_and_audibility(system: str, sigs: SignalSet, seg: Segmentation,
     Primary residual, linear-subtraction systems (none / nlms_f64 /
     nlms_q15): the exact component identity r = e - s - v. For a
     canceller with output e = d - y and d = d_echo + s + v this is
-    algebraically identical to the spec's decomposition d_echo - y(w(n))
+    algebraically identical to the trajectory decomposition d_echo - y(w(n))
     evaluated with the *exact per-sample* coefficients — i.e. the
     trajectory method at record_every = 1, which is the convention the
     reconstruction is unit-tested exact at. (Exact for nlms_f64; for
@@ -287,7 +287,7 @@ def residual_and_audibility(system: str, sigs: SignalSet, seg: Segmentation,
     from the trajectory residuals are recorded alongside the primary
     ones so the decimation's materiality is measured, not assumed.
 
-    speex: the spec's two-run approximation (same configuration on an
+    speex: a two-run approximation (the same configuration re-run on an
     echo-only microphone signal), with the ERLE difference between the
     two runs recorded as the approximation's error bar. The component
     identity is deliberately NOT used for speex: its internal DC notch

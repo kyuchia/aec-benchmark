@@ -22,7 +22,9 @@ distortion (segmental SNR, STOI, PESQ, log-spectral distance), coefficient
 misalignment against the true echo path, fixed-point stall/saturation
 event counts, and perceptual audibility of the isolated residual echo
 (simplified Bark-domain masking model; exact residual isolation for the
-linear systems, the spec's two-run approximation for SpeexDSP), plus
+linear systems; for SpeexDSP, whose coefficients are not exposed, a two-run
+approximation that re-runs the same configuration on an echo-only microphone
+signal), plus
 computational cost (measured canceller-only real-time factor, analytically
 derived MAC counts, and state sizes).
 

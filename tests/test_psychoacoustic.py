@@ -1,4 +1,4 @@
-"""Unit tests for §8.7: residual isolation and the masking model.
+"""Unit tests for residual isolation and the masking model.
 
 The reconstruction convention (hold = block-START state) is proven by
 exactness at record_every=1: there the "held" state for sample n is the

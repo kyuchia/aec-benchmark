@@ -157,7 +157,7 @@ def test_misalignment_curve_matches_scalar():
 
 
 # ---------------------------------------------------------------------------
-# Computational cost derivations (§8.6)
+# Computational cost derivations
 # ---------------------------------------------------------------------------
 
 def test_mac_counts_at_report_configuration():

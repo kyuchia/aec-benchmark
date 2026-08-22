@@ -1,4 +1,4 @@
-"""Computational cost (spec §8.6) -> results/raw/cost.csv.
+"""Computational cost -> results/raw/cost.csv.
 
 Real-time factor is measured around the canceller call ALONE — the
 batch's per-row wall times include synthesis, metrics, audibility, and

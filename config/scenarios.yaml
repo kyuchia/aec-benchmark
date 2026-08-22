@@ -79,7 +79,7 @@ segmentation:
   energy_threshold_dbov: -45.0
   hangover_ms: 200.0
 
-# Perceptual audibility of residual echo (spec §8.7). Simplified
+# Perceptual audibility of residual echo. Simplified
 # simultaneous-masking model, implemented in src/psychoacoustic.py — not an
 # existing PEAQ/psychoacoustics package: the analysis asks a *relative*
 # question (which system's residual is more audible under the same masker),

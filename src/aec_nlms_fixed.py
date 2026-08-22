@@ -1,9 +1,9 @@
-"""Q15 fixed-point sample-wise NLMS adaptive filter (spec §7.3).
+"""Q15 fixed-point sample-wise NLMS adaptive filter.
 
 Same system as aec_nlms.nlms, re-implemented in fixed point. Signals and
 coefficients are int16/Q15; every product is Q15 x Q15 -> Q30, accumulated
 in int64, and every narrowing back to 16 bits saturates. The reference for
-correctness is the §7.3 arithmetic executed naively (pure-Python unbounded
+correctness is the same arithmetic executed naively (pure-Python unbounded
 integers, tests/test_aec_nlms_fixed.py), against which this implementation
 is bit-exact — not the float path, whose role here is the shadow filter for
 the coefficient-divergence instrumentation.
@@ -36,11 +36,11 @@ Rounding convention (this choice is load-bearing — see below)
 -------------------------------------------------------------
 Every product narrowing (y, gain, per-tap update) uses **magnitude
 truncation** — shift toward zero via _trunc_shift_* — matching the
-spec's description of sub-LSB updates "truncating to zero": under
-magnitude truncation an update smaller than 1 LSB vanishes on *both*
-signs, which is the stalling phenomenon §7.3 asks to instrument. The
-word-length mask alone keeps the spec snippet's floor (>>/<<)
-semantics.
+definition of stalling adopted here — a sub-LSB update "truncates to
+zero": under magnitude truncation an update smaller than 1 LSB vanishes
+on *both* signs, which is the phenomenon the instrumentation counts. The
+word-length mask alone keeps the floor (>>/<<) semantics of the
+(w >> shift) << shift masking rule.
 
 A plain arithmetic shift (floor, toward -inf) at the update narrowing
 was implemented first and fails catastrophically on real speech at full
@@ -103,7 +103,7 @@ instrumentation with meaningless events.
 Word-length mask
 ----------------
 quantise_coeffs floors each coefficient to a multiple of 2^(15-bits)
-toward -inf (arithmetic >> then <<, the spec's snippet). Applied after
+toward -inf (arithmetic >> then <<). Applied after
 every update, it simulates *storing* w at reduced precision. Floor
 masking is asymmetric: a nonzero positive update smaller than the
 effective LSB is erased (a stall), while a nonzero negative one steps a
@@ -117,7 +117,7 @@ Stalling is recorded at two granularities, both evaluated on the final
 coefficient state of the sample — after saturation *and* after the mask,
 so the word-length sweep and the stall counts tell one story:
 
-  * Full-stall events (the spec's "adaptation halts"): sample n has
+  * Full-stall events ("adaptation halts"): sample n has
     err != 0, a nonzero tap in the window, and *no* coefficient changed.
     Covers g truncating to zero, every per-tap (g x)>>15 truncating to
     zero, and the mask erasing every change. A sample where saturation
@@ -131,7 +131,7 @@ so the word-length sweep and the stall counts tell one story:
 
 At full 15 bits the two agree in character: magnitude truncation kills
 sub-LSB updates on both signs, so a converged filter stalls massively —
-the spec's "adaptation halts" phenomenon at the Q15 noise floor. Under
+the "adaptation halts" phenomenon at the Q15 noise floor. Under
 the mask the two *diverge*, because the mask floors instead of
 truncating toward zero: an update that survives the arithmetic path
 (|dw| >= 1 Q15 LSB) but is smaller than the effective LSB is erased
@@ -205,7 +205,7 @@ def _sat16_vec(v: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def quantise_coeffs(w_q15: np.ndarray, bits: int) -> np.ndarray:
-    """Mask low coefficient bits (spec §7.3 snippet). bits=15 is identity.
+    """Mask low coefficient bits: (w >> shift) << shift. bits=15 is identity.
 
     Arithmetic >>/<< floors each coefficient to a multiple of 2^(15-bits)
     toward -inf; see the module docstring for the resulting asymmetry.

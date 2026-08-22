@@ -22,7 +22,7 @@ from segment import frame_power
 
 
 # ---------------------------------------------------------------------------
-# ERLE (§8.1) and convergence time (§8.2)
+# ERLE and convergence time
 # ---------------------------------------------------------------------------
 
 def erle_curve(d: np.ndarray, e: np.ndarray, erle_valid: np.ndarray,
@@ -101,7 +101,7 @@ def convergence_time_s(erle_smoothed_db: np.ndarray, erle_valid: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
-# Near-end distortion during double-talk (§8.3)
+# Near-end distortion during double-talk
 # ---------------------------------------------------------------------------
 
 def segmental_snr_db(ref: np.ndarray, est: np.ndarray,
@@ -185,7 +185,7 @@ def speech_quality_scores(ref: np.ndarray, est: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
-# Coefficient misalignment (§8.5)
+# Coefficient misalignment
 # ---------------------------------------------------------------------------
 
 def misalignment_db(w: np.ndarray, h: np.ndarray) -> float:
@@ -205,7 +205,7 @@ def misalignment_curve_db(w_traj: np.ndarray, h: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Computational cost (§8.6) — derived analytically, never measured
+# Computational cost — derived analytically, never measured
 # ---------------------------------------------------------------------------
 
 def nlms_mac_per_sample(L: int) -> float:
