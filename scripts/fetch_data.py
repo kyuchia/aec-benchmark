@@ -6,7 +6,7 @@ Idempotent: an already-verified archive is not re-downloaded, an
 already-extracted tree is not re-extracted.
 
 Usage:
-    python src/fetch_data.py
+    python scripts/fetch_data.py
 """
 
 from __future__ import annotations

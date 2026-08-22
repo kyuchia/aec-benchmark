@@ -8,9 +8,9 @@ point normalisation, bit-exact against a naive integer reference, with
 stalling/saturation instrumentation and a per-sample coefficient-divergence
 trace against an in-loop float shadow filter), and the SpeexDSP MDF echo
 canceller (as a linear canceller, no preprocessor), against a passthrough
-reference measured on the same int16 signal path. All signals are synthesised — LibriSpeech speech convolved with
-image-source room impulse responses — so every echo path and near-end signal
-is known exactly.
+reference measured on the same int16 signal path. All signals are
+synthesised — LibriSpeech speech convolved with image-source room impulse
+responses — so every echo path and near-end signal is known exactly.
 
 The experiment matrix crosses room reverberation (RT60 0.2–0.8 s, absorption
 calibrated against Schroeder-measured RT60) with loudspeaker–microphone
