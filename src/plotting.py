@@ -18,12 +18,45 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
+matplotlib.rcParams.update({
+    "savefig.dpi": 150,
+    "font.size": 11.5,
+    "axes.titlesize": 12.5,
+    "axes.labelsize": 11.5,
+    "xtick.labelsize": 10.5,
+    "ytick.labelsize": 10.5,
+    "legend.fontsize": 10,
+    "figure.titlesize": 13,
+})
+
 SYSTEM_COLORS = {
     "none": "#888888",
     "nlms_f64": "#1f77b4",
     "speex": "#ff7f0e",
     "nlms_q15": "#d62728",
 }
+
+# Reader-facing names for internal identifiers; data/CSV keys stay internal.
+SYSTEM_LABELS = {
+    "none": "Passthrough",
+    "nlms_f64": "Float NLMS",
+    "nlms_q15": "Q15 NLMS",
+    "speex": "SpeexDSP",
+}
+LEVEL_LABELS = {
+    "no_noise": "No noise", "snr20": "20 dB SNR", "snr10": "10 dB SNR",
+    "far_single": "Far-end only", "double": "Double-talk",
+    "near_single": "Near-end only", "double_talk": "Double-talk",
+    "50ms": "50 ms", "100ms": "100 ms", "200ms": "200 ms",
+    "400ms": "400 ms",
+    "mu0.1": "0.1", "mu0.3": "0.3", "mu0.5": "0.5", "mu0.9": "0.9",
+}
+
+
+def _seed_note(fig) -> None:
+    """Secondary caption replacing the old in-title debug wording."""
+    fig.text(0.99, 0.005, "points: individual seeds · bar: mean",
+             ha="right", va="bottom", fontsize=8.5, color="#666666")
 
 
 def plot_segmentation_diagnostic(run_dir: Path, out_path: Path) -> None:
@@ -68,7 +101,7 @@ def plot_segmentation_diagnostic(run_dir: Path, out_path: Path) -> None:
                   "purple=double talk, green=near only", fontsize=9)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -88,7 +121,7 @@ def plot_baseline_curves(csv_path: Path, cell_dir: Path, out_dir: Path,
         m = np.load(cell_dir / f"metrics_{system}.npz")
         color = SYSTEM_COLORS.get(system)
         ax.plot(m["frame_times_s"], m["erle_smoothed_db"], lw=1.2,
-                label=system, color=color)
+                label=SYSTEM_LABELS.get(system, system), color=color)
         ss = rows.loc[rows["system"] == system, "erle_steady_state_db"]
         if len(ss) and np.isfinite(ss.iloc[0]):
             ax.axhline(ss.iloc[0], ls=":", lw=0.8, color=color, alpha=0.7)
@@ -96,11 +129,11 @@ def plot_baseline_curves(csv_path: Path, cell_dir: Path, out_dir: Path,
     ax.set_ylabel("smoothed ERLE (dB)")
     ax.grid(alpha=0.3)
     ax.legend()
-    ax.set_title(f"baseline cell (RT60 0.4 s, 1.0 m, far single-talk) — "
-                 f"seed {seed}", fontsize=10)
+    ax.set_title(f"Baseline cell (RT60 0.4 s, 1.0 m, far-end only) — "
+                 f"seed {seed}")
     out_dir.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
-    fig.savefig(out_dir / "baseline_erle.png", dpi=120, bbox_inches="tight")
+    fig.savefig(out_dir / "baseline_erle.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(9, 4))
@@ -113,17 +146,18 @@ def plot_baseline_curves(csv_path: Path, cell_dir: Path, out_dir: Path,
         if "misalignment_curve_db" not in m:
             continue
         ax.plot(m["misalignment_times_s"], m["misalignment_curve_db"],
-                lw=1.2, color=SYSTEM_COLORS[system], label=system)
+                lw=1.2, color=SYSTEM_COLORS[system],
+                label=SYSTEM_LABELS.get(system, system))
         plotted = True
     if plotted:
         ax.set_xlabel("time (s)")
         ax.set_ylabel("misalignment (dB)")
         ax.grid(alpha=0.3)
         ax.legend()
-        ax.set_title("baseline cell — NLMS coefficient misalignment vs "
-                     "h_echo", fontsize=10)
+        ax.set_title("Baseline cell — coefficient misalignment vs the "
+                     "true echo path")
         fig.tight_layout()
-        fig.savefig(out_dir / "baseline_misalignment.png", dpi=120,
+        fig.savefig(out_dir / "baseline_misalignment.png", dpi=150,
                     bbox_inches="tight")
     plt.close(fig)
 
@@ -149,7 +183,7 @@ def _stage_a_heatmap(df: pd.DataFrame, value_col: str, label: str,
     dists = sorted(sub["speaker_mic_distance_m"].unique())
 
     fig, axes = plt.subplots(1, len(systems),
-                             figsize=(5.2 * len(systems), 4.2), sharey=True)
+                             figsize=(4.3 * len(systems), 3.9), sharey=True)
     vmin = sub[value_col].min()
     vmax = sub[value_col].max()
     for ax, system in zip(np.atleast_1d(axes), systems):
@@ -166,19 +200,19 @@ def _stage_a_heatmap(df: pd.DataFrame, value_col: str, label: str,
             for j in range(len(dists)):
                 if np.isfinite(grid[i, j]):
                     ax.text(j, i, fmt.format(grid[i, j]), ha="center",
-                            va="center", color="white", fontsize=10,
+                            va="center", color="white", fontsize=12,
                             path_effects=[
                                 matplotlib.patheffects.withStroke(
                                     linewidth=2, foreground="black")])
         ax.set_xticks(range(len(dists)), [f"{d:g}" for d in dists])
         ax.set_yticks(range(len(rts)), _rt60_row_labels(sub))
         ax.set_xlabel("speaker–mic distance (m)")
-        ax.set_title(system)
+        ax.set_title(SYSTEM_LABELS.get(system, system))
     np.atleast_1d(axes)[0].set_ylabel("RT60 target (s), achieved range")
     fig.colorbar(im, ax=list(np.atleast_1d(axes)), label=label, shrink=0.85)
-    fig.suptitle(f"Stage A — {label} (mean over 3 seeds)", fontsize=11)
+    fig.suptitle(f"Stage A — {label}, mean over 3 seeds")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -197,6 +231,7 @@ def _strip_axis(ax, sub: pd.DataFrame, levels: list, value_col: str,
                "speex": 0.3}
     for system, grp in sub.groupby("system"):
         color = SYSTEM_COLORS.get(system, "#333333")
+        sys_label = SYSTEM_LABELS.get(system, system)
         for k, level in enumerate(levels):
             pts = grp[grp[level_col] == level]
             if pts.empty:
@@ -206,17 +241,19 @@ def _strip_axis(ax, sub: pd.DataFrame, levels: list, value_col: str,
             ys = pts[value_col].to_numpy(dtype=float)
             ok = pts["status"].to_numpy() == "ok"
             ax.scatter(xs[ok], ys[ok], s=28, color=color, zorder=3,
-                       label=system if k == 0 else None)
+                       label=sys_label if k == 0 else None)
             ax.scatter(xs[~ok], ys[~ok], s=44, color=color, marker="x",
                        zorder=3,
-                       label=f"{system} (diverged)" if (~ok).any() and k >= 0
-                       and f"{system} (diverged)" not in
+                       label=f"{sys_label} (diverged)" if (~ok).any()
+                       and k >= 0
+                       and f"{sys_label} (diverged)" not in
                        [h.get_label() for h in ax.collections] else None)
             finite = ys[np.isfinite(ys)]
             if len(finite):
                 ax.hlines(np.mean(finite), k - 0.3, k + 0.3, color=color,
                           lw=1.0, alpha=0.5)
-    ax.set_xticks(range(len(levels)), [str(lv) for lv in levels])
+    ax.set_xticks(range(len(levels)),
+                  [LEVEL_LABELS.get(str(lv), str(lv)) for lv in levels])
     ax.grid(alpha=0.3, axis="y")
 
 
@@ -227,16 +264,16 @@ def plot_stage_b_talk(csv_path: Path, out_dir: Path) -> None:
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2))
     _strip_axis(ax1, sub, levels, "erle_steady_state_db")
     ax1.set_ylabel("steady-state ERLE (dB)")
-    ax1.set_title("echo suppression (far-only regions)", fontsize=10)
-    ax1.legend(fontsize=8)
+    ax1.set_title("echo suppression (far-end-only regions)")
+    ax1.legend()
     _strip_axis(ax2, sub, levels, "segsnr_db")
     ax2.set_ylabel("segmental SNR (dB)")
-    ax2.set_title("near-end distortion (near-active regions)", fontsize=10)
-    fig.suptitle("Stage B — talk state (per-seed points, bar = mean)",
-                 fontsize=11)
+    ax2.set_title("near-end distortion (near-active regions)")
+    fig.suptitle("Stage B — talk state")
     fig.tight_layout()
+    _seed_note(fig)
     out_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_dir / "stage_b_talk.png", dpi=120, bbox_inches="tight")
+    fig.savefig(out_dir / "stage_b_talk.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -248,11 +285,12 @@ def plot_stage_b_noise(csv_path: Path, out_dir: Path) -> None:
     _strip_axis(ax, sub, levels, "erle_steady_state_db")
     ax.set_ylabel("steady-state ERLE (dB)")
     ax.set_xlabel("background noise")
-    ax.legend(fontsize=8)
-    ax.set_title("Stage B — noise (per-seed points, bar = mean)", fontsize=11)
+    ax.legend()
+    ax.set_title("Echo suppression under background noise")
     fig.tight_layout()
+    _seed_note(fig)
     out_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_dir / "stage_b_noise.png", dpi=120, bbox_inches="tight")
+    fig.savefig(out_dir / "stage_b_noise.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -264,15 +302,15 @@ def plot_stage_b_tail(csv_path: Path, out_dir: Path) -> None:
     _strip_axis(ax1, sub, levels, "erle_steady_state_db")
     ax1.set_ylabel("steady-state ERLE (dB)")
     ax1.set_xlabel("filter length")
-    ax1.legend(fontsize=8)
+    ax1.legend()
     _strip_axis(ax2, sub, levels, "convergence_time_s")
     ax2.set_ylabel("convergence time (s)")
     ax2.set_xlabel("filter length")
-    fig.suptitle("Stage B — tail length (per-seed points, bar = mean)",
-                 fontsize=11)
+    fig.suptitle("Stage B — tail length")
     fig.tight_layout()
+    _seed_note(fig)
     out_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_dir / "stage_b_tail.png", dpi=120, bbox_inches="tight")
+    fig.savefig(out_dir / "stage_b_tail.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -291,15 +329,15 @@ def plot_stage_b_mu(csv_path: Path, out_dir: Path) -> None:
         if not ref.empty:
             ax.axhline(ref[col].mean(), color=SYSTEM_COLORS["speex"],
                        ls="--", lw=1.2,
-                       label="speex @ baseline (reference, not swept)")
+                       label="SpeexDSP @ baseline (reference, not swept)")
         ax.set_ylabel(ylabel)
         ax.set_xlabel("NLMS step size μ")
-        ax.legend(fontsize=8)
-    fig.suptitle("Stage B — NLMS step size (per-seed points, bar = mean)",
-                 fontsize=11)
+        ax.legend()
+    fig.suptitle("Stage B — NLMS step size")
     fig.tight_layout()
+    _seed_note(fig)
     out_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_dir / "stage_b_mu.png", dpi=120, bbox_inches="tight")
+    fig.savefig(out_dir / "stage_b_mu.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -328,7 +366,7 @@ def plot_word_length(csv_path: Path, out_dir: Path) -> None:
             ys = pts[col].to_numpy(dtype=float)
             ok = np.isfinite(ys)
             ax.scatter(xs[ok], ys[ok], s=34, color=color, zorder=3,
-                       label="nlms_q15 (masked)" if k == 0 else None)
+                       label="Q15 NLMS (masked)" if k == 0 else None)
             if len(ys[ok]):
                 ax.hlines(np.mean(ys[ok]), k - 0.28, k + 0.28, color=color,
                           lw=1.1, alpha=0.6)
@@ -342,7 +380,7 @@ def plot_word_length(csv_path: Path, out_dir: Path) -> None:
                            [h.get_label() for h in ax.collections]
                            else None)
         ax.axhline(f64_ref[col].mean(), color=ref_color, ls="--", lw=1.2,
-                   label="nlms_f64, same scenario (float reference)")
+                   label="Float NLMS, same scenario (reference)")
         if col == "erle_steady_state_db":
             ax.axhline(0.0, color="#888888", ls=":", lw=1.0,
                        label="0 dB (no processing)")
@@ -351,12 +389,12 @@ def plot_word_length(csv_path: Path, out_dir: Path) -> None:
         ax.set_xlabel("effective coefficient word length (bits)")
         ax.set_ylabel(ylabel)
         ax.grid(alpha=0.3, axis="y")
-        ax.legend(fontsize=8)
-    fig.suptitle("Word-length sweep — Q15 NLMS with masked coefficients "
-                 "(per-seed points, bar = mean)", fontsize=11)
+        ax.legend(fontsize=9)
+    fig.suptitle("Word-length sweep — Q15 NLMS with masked coefficients")
     fig.tight_layout()
+    _seed_note(fig)
     out_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_dir / "word_length_sweep.png", dpi=120,
+    fig.savefig(out_dir / "word_length_sweep.png", dpi=150,
                 bbox_inches="tight")
     plt.close(fig)
 
@@ -377,12 +415,11 @@ def plot_q15_float_divergence(cell_dir: Path, out_dir: Path,
     ax.set_xlabel("time (s)")
     ax.set_ylabel("10·log10(‖w_q15/2¹⁵ − w_float‖² / ‖w_float‖²)  (dB)")
     ax.grid(alpha=0.3)
-    ax.set_title("baseline cell — Q15 coefficient divergence from the "
-                 "float64 shadow filter (identical quantised input)",
-                 fontsize=10)
+    ax.set_title("Baseline cell — Q15 coefficient divergence from the "
+                 "float64 shadow filter (identical quantised input)")
     fig.tight_layout()
     out_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_dir / "q15_float_divergence.png", dpi=120,
+    fig.savefig(out_dir / "q15_float_divergence.png", dpi=150,
                 bbox_inches="tight")
     plt.close(fig)
 
@@ -402,18 +439,20 @@ def plot_audibility(csv_path: Path, out_dir: Path) -> None:
     _strip_axis(ax1, sub, levels, "audibility_fraction")
     ax1.set_ylabel("fraction of TF units above threshold")
     ax1.set_ylim(-0.02, 1.05)
-    ax1.legend(fontsize=8)
+    ax1.legend()
     _strip_axis(ax2, sub, levels, "audibility_excess_db")
     ax2.set_ylabel("mean excess above threshold (dB)")
     for ax in (ax1, ax2):
         ax.set_xlabel("condition (baseline room)")
-    fig.suptitle("Residual-echo audibility — far-single segments "
-                 "(per-seed points, bar = mean); threshold = spread "
-                 "noise masking in snr cells, constant floor where the "
-                 "masker is silent (no_noise, double_talk)", fontsize=10)
+    fig.suptitle("Residual-echo audibility over far-end-only segments")
     fig.tight_layout()
+    fig.text(0.01, 0.005,
+             "threshold: noise masking where present, constant floor "
+             "where the masker is silent · points: individual seeds · "
+             "bar: mean", ha="left", va="bottom", fontsize=8.5,
+             color="#666666")
     out_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_dir / "audibility.png", dpi=120, bbox_inches="tight")
+    fig.savefig(out_dir / "audibility.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 

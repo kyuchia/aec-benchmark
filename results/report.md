@@ -11,7 +11,7 @@ and the word-length sweep (§2.7–2.8), perceptual audibility of residual
 echo (§2.9), and computational cost (§2.10). All numbers in this
 report are
 rendered from `results/raw/*.csv` by `scripts/render_report.py`; run
-provenance (git SHA per row): 361b8f3.
+provenance (git SHA per row): 3fc93f4.
 
 ## 1. Method
 
@@ -281,7 +281,7 @@ baseline as a labelled reference — it has no step-size parameter), and
 effective coefficient word length (`nlms_q15` only, via low-bit masking;
 the unmasked 15-bit level is run under its own label so the sweep is
 constructed identically at every level). 279 rows; the sum of
-per-row processing times is 18.2 min.
+per-row processing times is 22.4 min.
 
 ## 2. Results
 
