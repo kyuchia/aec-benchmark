@@ -53,11 +53,6 @@ LEVEL_LABELS = {
 }
 
 
-def _seed_note(fig) -> None:
-    """Secondary caption replacing the old in-title debug wording."""
-    fig.text(0.99, 0.005, "points: individual seeds · bar: mean",
-             ha="right", va="bottom", fontsize=8.5, color="#666666")
-
 
 def plot_segmentation_diagnostic(run_dir: Path, out_path: Path) -> None:
     """Component envelopes plus the resulting three-state strip."""
@@ -116,7 +111,7 @@ def plot_baseline_curves(csv_path: Path, cell_dir: Path, out_dir: Path,
     rows = df[(df["stage"] == "a") & (df["seed"] == seed)
               & (df["scenario_key"].str.startswith("rt0.4_d1_"))]
 
-    fig, ax = plt.subplots(figsize=(9, 4.5))
+    fig, ax = plt.subplots(figsize=(8.7, 4.25), layout="constrained")
     for system in systems:
         m = np.load(cell_dir / f"metrics_{system}.npz")
         color = SYSTEM_COLORS.get(system)
@@ -129,14 +124,12 @@ def plot_baseline_curves(csv_path: Path, cell_dir: Path, out_dir: Path,
     ax.set_ylabel("smoothed ERLE (dB)")
     ax.grid(alpha=0.3)
     ax.legend()
-    ax.set_title(f"Baseline cell (RT60 0.4 s, 1.0 m, far-end only) — "
-                 f"seed {seed}")
+    ax.set_title(f"ERLE — baseline cell, seed {seed}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout()
     fig.savefig(out_dir / "baseline_erle.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(9, 4))
+    fig, ax = plt.subplots(figsize=(8.7, 3.8), layout="constrained")
     plotted = False
     for system in ("nlms_f64", "nlms_q15"):
         path = cell_dir / f"metrics_{system}.npz"
@@ -154,9 +147,7 @@ def plot_baseline_curves(csv_path: Path, cell_dir: Path, out_dir: Path,
         ax.set_ylabel("misalignment (dB)")
         ax.grid(alpha=0.3)
         ax.legend()
-        ax.set_title("Baseline cell — coefficient misalignment vs the "
-                     "true echo path")
-        fig.tight_layout()
+        ax.set_title("Misalignment — baseline cell")
         fig.savefig(out_dir / "baseline_misalignment.png", dpi=150,
                     bbox_inches="tight")
     plt.close(fig)
@@ -183,7 +174,8 @@ def _stage_a_heatmap(df: pd.DataFrame, value_col: str, label: str,
     dists = sorted(sub["speaker_mic_distance_m"].unique())
 
     fig, axes = plt.subplots(1, len(systems),
-                             figsize=(4.3 * len(systems), 3.9), sharey=True)
+                             figsize=(3.5 * len(systems), 3.9), sharey=True,
+                             layout="constrained")
     vmin = sub[value_col].min()
     vmax = sub[value_col].max()
     for ax, system in zip(np.atleast_1d(axes), systems):
@@ -210,7 +202,6 @@ def _stage_a_heatmap(df: pd.DataFrame, value_col: str, label: str,
         ax.set_title(SYSTEM_LABELS.get(system, system))
     np.atleast_1d(axes)[0].set_ylabel("RT60 target (s), achieved range")
     fig.colorbar(im, ax=list(np.atleast_1d(axes)), label=label, shrink=0.85)
-    fig.suptitle(f"Stage A — {label}, mean over 3 seeds")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -260,18 +251,20 @@ def _strip_axis(ax, sub: pd.DataFrame, levels: list, value_col: str,
 def plot_stage_b_talk(csv_path: Path, out_dir: Path) -> None:
     df = pd.read_csv(csv_path)
     sub = df[(df["stage"] == "b") & (df["axis"] == "talk")]
-    levels = ["far_single", "double", "near_single"]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2))
-    _strip_axis(ax1, sub, levels, "erle_steady_state_db")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.7, 4.2),
+                                   layout="constrained")
+    # ERLE is undefined with no far-end activity, so near_single is not
+    # on this axis at all (no placeholder slot), mirroring the right
+    # panel's rule for STOI under far_single.
+    _strip_axis(ax1, sub, ["far_single", "double"], "erle_steady_state_db")
     ax1.set_ylabel("steady-state ERLE (dB)")
     ax1.set_title("echo suppression (far-end-only regions)")
     ax1.legend()
-    _strip_axis(ax2, sub, levels, "segsnr_db")
-    ax2.set_ylabel("segmental SNR (dB)")
-    ax2.set_title("near-end distortion (near-active regions)")
-    fig.suptitle("Stage B — talk state")
-    fig.tight_layout()
-    _seed_note(fig)
+    # STOI exists only where the near end is active; far_single is
+    # intentionally absent from this panel.
+    _strip_axis(ax2, sub, ["double", "near_single"], "stoi")
+    ax2.set_ylabel("STOI")
+    ax2.set_title("near-end intelligibility (near-active regions)")
     out_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_dir / "stage_b_talk.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -281,14 +274,12 @@ def plot_stage_b_noise(csv_path: Path, out_dir: Path) -> None:
     df = pd.read_csv(csv_path)
     sub = df[(df["stage"] == "b") & (df["axis"] == "noise")]
     levels = ["no_noise", "snr20", "snr10"]
-    fig, ax = plt.subplots(figsize=(6.5, 4.2))
+    fig, ax = plt.subplots(figsize=(6.3, 4.1), layout="constrained")
     _strip_axis(ax, sub, levels, "erle_steady_state_db")
     ax.set_ylabel("steady-state ERLE (dB)")
     ax.set_xlabel("background noise")
     ax.legend()
-    ax.set_title("Echo suppression under background noise")
-    fig.tight_layout()
-    _seed_note(fig)
+    ax.set_title("ERLE under background noise")
     out_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_dir / "stage_b_noise.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -298,17 +289,12 @@ def plot_stage_b_tail(csv_path: Path, out_dir: Path) -> None:
     df = pd.read_csv(csv_path)
     sub = df[(df["stage"] == "b") & (df["axis"] == "tail_length")]
     levels = ["50ms", "100ms", "200ms", "400ms"]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2))
-    _strip_axis(ax1, sub, levels, "erle_steady_state_db")
-    ax1.set_ylabel("steady-state ERLE (dB)")
-    ax1.set_xlabel("filter length")
-    ax1.legend()
-    _strip_axis(ax2, sub, levels, "convergence_time_s")
-    ax2.set_ylabel("convergence time (s)")
-    ax2.set_xlabel("filter length")
-    fig.suptitle("Stage B — tail length")
-    fig.tight_layout()
-    _seed_note(fig)
+    fig, ax = plt.subplots(figsize=(6.3, 4.1), layout="constrained")
+    _strip_axis(ax, sub, levels, "erle_steady_state_db")
+    ax.set_ylabel("steady-state ERLE (dB)")
+    ax.set_xlabel("filter length")
+    ax.legend()
+    ax.set_title("ERLE vs filter length")
     out_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_dir / "stage_b_tail.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -320,22 +306,22 @@ def plot_stage_b_mu(csv_path: Path, out_dir: Path) -> None:
     swept = sub[sub["level"] != "reference"]
     ref = sub[sub["level"] == "reference"]
     levels = sorted(swept["level"].unique(), key=lambda s: float(s[2:]))
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.7, 4.2),
+                                   layout="constrained")
+    # SpeexDSP exposes no coefficients, so it has no misalignment and
+    # appears only on the ERLE panel (as the unswept reference line).
     for ax, col, ylabel in [(ax1, "erle_steady_state_db",
                              "steady-state ERLE (dB)"),
-                            (ax2, "convergence_time_s",
-                             "convergence time (s)")]:
+                            (ax2, "misalignment_final_db",
+                             "final misalignment (dB)")]:
         _strip_axis(ax, swept, levels, col)
-        if not ref.empty:
+        if col == "erle_steady_state_db" and not ref.empty:
             ax.axhline(ref[col].mean(), color=SYSTEM_COLORS["speex"],
                        ls="--", lw=1.2,
                        label="SpeexDSP @ baseline (reference, not swept)")
         ax.set_ylabel(ylabel)
         ax.set_xlabel("NLMS step size μ")
         ax.legend()
-    fig.suptitle("Stage B — NLMS step size")
-    fig.tight_layout()
-    _seed_note(fig)
     out_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_dir / "stage_b_mu.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -355,11 +341,12 @@ def plot_word_length(csv_path: Path, out_dir: Path) -> None:
     color = SYSTEM_COLORS["nlms_q15"]
     ref_color = SYSTEM_COLORS["nlms_f64"]
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.4))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.7, 4.35),
+                                   layout="constrained")
     for ax, col, ylabel in [(ax1, "erle_steady_state_db",
                              "steady-state ERLE (dB)"),
-                            (ax2, "convergence_time_s",
-                             "convergence time (s)")]:
+                            (ax2, "misalignment_final_db",
+                             "final misalignment (dB)")]:
         for k, level in enumerate(levels):
             pts = sub[sub["level"] == level]
             xs = k + (pts["seed"].to_numpy() - 1) * 0.06
@@ -390,9 +377,6 @@ def plot_word_length(csv_path: Path, out_dir: Path) -> None:
         ax.set_ylabel(ylabel)
         ax.grid(alpha=0.3, axis="y")
         ax.legend(fontsize=9)
-    fig.suptitle("Word-length sweep — Q15 NLMS with masked coefficients")
-    fig.tight_layout()
-    _seed_note(fig)
     out_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_dir / "word_length_sweep.png", dpi=150,
                 bbox_inches="tight")
@@ -410,14 +394,12 @@ def plot_q15_float_divergence(cell_dir: Path, out_dir: Path,
     div = z["coeff_div_db"]
     dec = 16  # plot decimation only; the stored curve is per-sample
     t = np.arange(len(div))[::dec] / sample_rate
-    fig, ax = plt.subplots(figsize=(9, 4))
+    fig, ax = plt.subplots(figsize=(9, 4), layout="constrained")
     ax.plot(t, div[::dec], lw=0.9, color=SYSTEM_COLORS["nlms_q15"])
     ax.set_xlabel("time (s)")
     ax.set_ylabel("10·log10(‖w_q15/2¹⁵ − w_float‖² / ‖w_float‖²)  (dB)")
     ax.grid(alpha=0.3)
-    ax.set_title("Baseline cell — Q15 coefficient divergence from the "
-                 "float64 shadow filter (identical quantised input)")
-    fig.tight_layout()
+    ax.set_title("Q15 divergence from float shadow")
     out_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_dir / "q15_float_divergence.png", dpi=150,
                 bbox_inches="tight")
@@ -425,32 +407,33 @@ def plot_q15_float_divergence(cell_dir: Path, out_dir: Path,
 
 
 def plot_audibility(csv_path: Path, out_dir: Path) -> None:
-    """Residual-echo audibility across the noise axis (the cells with a
-    real masker) plus the double-talk cell: fraction of TF units above
-    the masking threshold, and mean excess over it."""
+    """Residual-echo audibility at the baseline cell (RT60 0.4 s, 1.0 m,
+    far-end only, no noise), per system: fraction of TF units above the
+    masking threshold and mean excess over it. In this cell the speex
+    residual from the two-run isolation is exact: d == d_echo, so the
+    echo-only rerun is bit-identical to the primary run."""
     df = pd.read_csv(csv_path)
-    noise = df[(df["stage"] == "b") & (df["axis"] == "noise")].copy()
-    dt = df[(df["stage"] == "b") & (df["axis"] == "talk")
-            & (df["level"] == "double")].copy()
-    dt["level"] = "double_talk"
-    sub = pd.concat([noise, dt])
-    levels = ["no_noise", "snr20", "snr10", "double_talk"]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.4))
-    _strip_axis(ax1, sub, levels, "audibility_fraction")
-    ax1.set_ylabel("fraction of TF units above threshold")
+    sub = df[(df["stage"] == "a") & (df["level"] == "rt0.4_d1")]
+    systems = ["none", "nlms_f64", "nlms_q15", "speex"]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9.5, 4.2),
+                                   layout="constrained")
+    for ax, col, ylabel in [(ax1, "audibility_fraction",
+                             "fraction of TF units above threshold"),
+                            (ax2, "audibility_excess_db",
+                             "mean excess above threshold (dB)")]:
+        for k, system in enumerate(systems):
+            pts = sub[sub["system"] == system]
+            xs = k + (pts["seed"].to_numpy() - 1) * 0.08
+            ys = pts[col].to_numpy(dtype=float)
+            ax.scatter(xs, ys, s=34, color=SYSTEM_COLORS[system], zorder=3)
+            ax.hlines(np.nanmean(ys), k - 0.25, k + 0.25,
+                      color=SYSTEM_COLORS[system], lw=1.1, alpha=0.6)
+        ax.set_xticks(range(len(systems)),
+                      [SYSTEM_LABELS[s] for s in systems])
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.3, axis="y")
     ax1.set_ylim(-0.02, 1.05)
-    ax1.legend()
-    _strip_axis(ax2, sub, levels, "audibility_excess_db")
-    ax2.set_ylabel("mean excess above threshold (dB)")
-    for ax in (ax1, ax2):
-        ax.set_xlabel("condition (baseline room)")
-    fig.suptitle("Residual-echo audibility over far-end-only segments")
-    fig.tight_layout()
-    fig.text(0.01, 0.005,
-             "threshold: noise masking where present, constant floor "
-             "where the masker is silent · points: individual seeds · "
-             "bar: mean", ha="left", va="bottom", fontsize=8.5,
-             color="#666666")
+    ax1.set_title("audibility — baseline cell")
     out_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_dir / "audibility.png", dpi=150, bbox_inches="tight")
     plt.close(fig)

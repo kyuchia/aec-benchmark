@@ -12,8 +12,12 @@ was written from scratch.
 
 Microphone mixtures are synthesised from LibriSpeech speech and simulated
 room impulse responses, so every echo path, near-end signal, and noise
-component is known exactly — which makes exact residual-echo isolation and
-coefficient-misalignment measurement possible.
+component is known exactly. That supports component-level residual-echo
+isolation for the linear-subtraction paths and ground-truth
+coefficient-misalignment measurement for the NLMS filters; SpeexDSP's
+coefficients are not observable through the binding, so its residual is
+obtained by a separate echo-only run instead and its misalignment is not
+measured.
 
 ## Key results
 
@@ -47,7 +51,12 @@ runs, 1/3 runs at 20 dB SNR, and 3/3 runs at 10 dB SNR.
    partitioned frequency-domain structure vs 6,400 MAC/sample for
    time-domain NLMS.
 
-![Echo suppression under background noise](results/figures/stage_b_noise.png)
+![Steady-state ERLE under background noise](results/figures/stage_b_noise.png)
+
+**Background-noise robustness.** Steady-state ERLE under background noise
+at the baseline room; points are individual seeds, bars are means, and
+diverged Float NLMS runs are drawn as crosses — part of the data, not
+excluded. (Figure 3 in [results/report.md](results/report.md).)
 
 ## Benchmark
 
@@ -82,7 +91,8 @@ python scripts/make_figures.py        # all figures -> results/figures/
 python scripts/render_report.py       # report      -> results/report.md
 ```
 
-The batch (279 runs) completes in roughly 20 minutes on a laptop and is
+The full matrix is 279 runs; the recorded batch took 22.4 minutes of
+wall-clock time on a laptop. The batch is
 deterministic: re-running reproduces every metric column bit-identically.
 `config/scenarios.yaml` is the single source of truth for the experiment
 matrix, and every number in the report is rendered from the persisted
